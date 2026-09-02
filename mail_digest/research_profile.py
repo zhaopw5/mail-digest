@@ -55,3 +55,5 @@ FOCUS_TOPICS: list = list(PROFILE.get("focus_topics", []))
 METHOD_TOPICS: list = list(PROFILE.get("method_topics", []))
 SECONDARY_TOPICS: list = list(PROFILE.get("secondary_topics", []))
 KNOWN_LITERATURE: list = list(PROFILE.get("known_literature", []))
+SKILLS: list = list(PROFILE.get("skills", []))            # 技术/方法能力清单
+EXPERIENCE: list = list(PROFILE.get("experience", []))    # 项目/经历清单

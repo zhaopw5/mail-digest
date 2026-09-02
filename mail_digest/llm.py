@@ -141,19 +141,34 @@ def parse_article_result(raw: dict, bibcode: str) -> dict:
 GRANT_FIELDS = (
     "project_name", "field", "deadline", "deadline_date",
     "amount", "eligibility", "materials", "notes", "applicable",
+    "match_level", "match_reason",
 )
 
 
-def build_grant_messages(subject: str, sender: str, date_str: str, text: str) -> list[dict]:
+def build_grant_messages(subject: str, sender: str, date_str: str, text: str,
+                         profile: dict | None = None) -> list[dict]:
     """构造「一封基金通知 → 申报机会结构化 JSON」的对话消息。
 
     text 为邮件正文 + 附件合并文本（已在调用方截断）。
+    profile 含个人研究画像与技能（skills/experience），用于输出能力匹配分析。
     """
     system = (
         "你是高校科研管理助理，熟悉国家自然科学基金、省部级科技计划等各类项目申报。"
-        "你的任务：从学院转发的基金/项目申报通知中抽取关键申报信息。"
+        "你的任务：从学院转发的基金/项目申报通知中抽取关键申报信息，"
+        "并结合申报人的技能经历判断匹配度。"
     )
+    profile_block = ""
+    if profile:
+        skills = profile.get("skills") or []
+        exp = profile.get("experience") or []
+        profile_block = (
+            "\n\n【申报人技能与经历（仅据此判断匹配，禁止虚构申报人经历）】\n"
+            f"研究方向: {profile.get('summary', '')}\n"
+            f"技能: {'；'.join(skills) if skills else '(未提供)'}\n"
+            f"经历: {'；'.join(exp) if exp else '(未提供)'}"
+        )
     user = f"""下面是学院转发的一封项目申报通知（正文+附件文本，附件已按文件名分段）。
+{profile_block}
 
 【邮件信息】
 主题: {subject or '(无)'}
@@ -173,10 +188,12 @@ def build_grant_messages(subject: str, sender: str, date_str: str, text: str) ->
   "eligibility": "申报条件要点，压缩到120字以内；未提及写 未提及",
   "materials": "申报材料清单要点，压缩到120字以内；未提及写 未提及",
   "notes": "其他必须注意的关键要求（限项、校内截止、登录系统等），压缩到100字以内",
-  "applicable": true或false —— 该申报机会对「博士后身份的研究人员」是否大概率可申报"
+  "applicable": true或false —— 该申报机会对「博士后身份的研究人员」是否大概率可申报",
+  "match_level": "四选一：高度匹配 / 部分匹配 / 待确认 / 不匹配",
+  "match_reason": "能力匹配说明（≤90字）：对照申报人技能与经历，指出该机会能用到申报人哪些技术/方法/经验（如深度学习、数据分析、某类物理背景），或说明缺哪些关键能力"
 }}
 规则：日期、金额、限项数等关键信息必须忠实引用原文，禁止编造；附件与正文矛盾时以附件指南/通知为准；
-文本中没有的信息一律写 未提及/空，不要猜测。"""
+文本中没有的信息一律写 未提及/空，不要猜测。match_reason 只能基于提供的技能与经历推断，禁止虚构申报人经历。"""
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 

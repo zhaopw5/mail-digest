@@ -19,6 +19,7 @@ from . import doctext as dt
 from .config import Config
 from .llm import LLMError, DeepSeekClient, build_grant_messages, parse_grant_result
 from .models import Mail
+from .research_profile import PROFILE
 
 DEFAULT_TEXT_CAP = 12000          # 每封送入 LLM 的合并文本上限（字符）
 
@@ -89,7 +90,7 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
     if client:
         try:
             msgs = build_grant_messages(mail.subject, mail.from_,
-                                        result["date"], text)
+                                        result["date"], text, profile=PROFILE)
             raw = client.complete_json(msgs)
             result["llm"] = parse_grant_result(raw)
         except LLMError as exc:
@@ -104,23 +105,27 @@ def _pretty_deadline(res: dict) -> str:
     return str(llm.get("deadline") or "未知")
 
 
+_MATCH_RANK = {"高度匹配": 0, "部分匹配": 1, "待确认": 2, "不匹配": 3}
+
+
 def _sort_key(res: dict) -> tuple:
     llm = res.get("llm") or {}
     d = str(llm.get("deadline_date") or "")
-    return (0 if d else 1, d)
+    rank = _MATCH_RANK.get(str(llm.get("match_level") or ""), 4)
+    return (rank, 0 if d else 1, d)
 
 
 def build_daily_list(results: list[dict], when: date) -> str:
-    """把当天处理的邮件结果汇总为 Markdown 申报机会清单（按截止日期排序）。"""
+    """把当天处理的邮件结果汇总为 Markdown 申报机会清单。
+
+    按能力匹配度（高度匹配优先）再截止日期排序；每条标注与申报人技能/经历的匹配说明。
+    """
     if not results:
         return f"# 项目申报机会清单 {when:%Y-%m-%d}\n\n今日无新申报通知。\n"
-    applicable = [r for r in results if (r.get("llm") or {}).get("applicable") is True]
-    others = [r for r in results if r not in applicable]
     lines = [
         f"# 项目申报机会清单 {when:%Y-%m-%d}",
         "",
-        f"- 今日申报通知：**{len(results)}** 封"
-        + (f"（其中 {len(applicable)} 封可能适合博士后申报）" if applicable else ""),
+        f"- 今日申报通知：**{len(results)}** 封（按与你技能/经历的匹配度排序，匹配说明基于附件与你的能力档案）",
         "",
     ]
 
@@ -132,6 +137,10 @@ def build_daily_list(results: list[dict], when: date) -> str:
         mark = "⏰" if llm.get("deadline_date") else ""
         out.append(f"### {name} {mark}")
         out.append(f"- 截止：{dl}")
+        if llm.get("match_level") and llm.get("match_reason"):
+            lv = llm["match_level"]
+            icon = {"高度匹配": "🎯", "部分匹配": "🧩", "待确认": "❓", "不匹配": "⚪"}.get(lv, "🧩")
+            out.append(f"- {icon} 能力匹配：**{lv}**——{llm['match_reason']}")
         if llm.get("field"):
             out.append(f"- 领域：{llm['field']}")
         if llm.get("amount") and llm["amount"] != "未提及":
@@ -151,16 +160,8 @@ def build_daily_list(results: list[dict], when: date) -> str:
         out.append("")
         return out
 
-    if applicable:
-        lines.append("## ✅ 可能适合博士后申报")
-        lines.append("")
-        for res in sorted(applicable, key=_sort_key):
-            lines.extend(render(res))
-    if others:
-        lines.append("## 📄 其他申报通知（按提示判断适用性有限/待确认）")
-        lines.append("")
-        for res in sorted(others, key=_sort_key):
-            lines.extend(render(res))
+    for res in sorted(results, key=_sort_key):
+        lines.extend(render(res))
     return "\n".join(lines)
 
 
