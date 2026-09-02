@@ -146,6 +146,29 @@ def test_tar_symlink_blocked() -> None:
         assert not (dest / "evil_link").exists(), "符号链接不得落盘"
 
 
+def test_zip_bomb_blocked() -> None:
+    """zip 炸弹：条目声明超大体积（NUL 压缩后很小）必须被预算拦截。"""
+    import zipfile
+    import tempfile
+    from mail_digest.attachments import AttachmentError, MAX_EXTRACT_TOTAL, _extract_one
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        zpath = root / "bomb.zip"
+        with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # 200MB 零填充 → 压缩后极小，但 infolist 的 file_size 为 200MB+
+            zf.writestr("huge.bin", b"\x00" * (MAX_EXTRACT_TOTAL + 1))
+        assert zpath.stat().st_size < 1 * 1024 * 1024, "压缩后应远小于 200MB"
+        dest = root / "out"
+        try:
+            _extract_one(zpath, dest)
+            raise AssertionError("应拦截 zip 炸弹")
+        except AttachmentError:
+            pass
+        leftover = sum(p.stat().st_size for p in dest.rglob("*") if p.is_file()) if dest.exists() else 0
+        assert leftover <= MAX_EXTRACT_TOTAL, "不得残留超限文件"
+
+
 def test_sender_allowlist() -> None:
     """可信发件人白名单匹配（fail-closed：空白名单拒绝一切）。"""
     from mail_digest.config import sender_allowed
@@ -169,5 +192,6 @@ if __name__ == "__main__":
     test_parse_myads_sections()
     test_zip_path_traversal_blocked()
     test_tar_symlink_blocked()
+    test_zip_bomb_blocked()
     test_sender_allowlist()
     print("✅ 全部本地测试通过（含安全回归）")

@@ -1,15 +1,21 @@
 """附件提取与递归解压（场景二核心）。
 
 安全要点（README 工程要点）：
-  - 附件文件名清洗（去路径分隔符/非法字符，拒绝绝对路径）
+  - 附件文件名清洗（去路径分隔符/非法字符，拒绝绝对路径、限长）
   - 单附件大小上限（超出记录并跳过，不静默失败）
-  - 压缩包解压防路径穿越（拒绝 .. 与绝对路径条目）、总量上限、嵌套深度上限
+  - 压缩包解压防路径穿越（拒绝 .. /绝对路径/symlink/硬链接/设备条目）
+  - 压缩炸弹防护：ZIP/TAR 事前逐条预算总量；7z 事前按成员预算；
+    RAR 子进程写入限额（RLIMIT_FSIZE）；全部格式解压后统一总量/文件数复核
+  - 嵌套解压层数上限
 """
 from __future__ import annotations
 
 import email
+import os
 import re
 import shutil
+import subprocess
+import sys
 import tarfile
 import zipfile
 from email.header import decode_header, make_header
@@ -19,11 +25,13 @@ from .models import Mail
 
 # 默认限制
 MAX_ATTACH_SIZE = 30 * 1024 * 1024      # 单附件 30 MB
-MAX_EXTRACT_TOTAL = 200 * 1024 * 1024   # 解压总量 200 MB
+MAX_EXTRACT_TOTAL = 200 * 1024 * 1024   # 单个归档解压总量 200 MB
+MAX_FILES = 2000                        # 单个归档解压文件数上限（防 inode 耗尽）
 MAX_DEPTH = 3                           # 嵌套解压层数
 
 _SAFE_NAME_RE = re.compile(r"[\\/:*?\"<>|\r\n]+")
 _UNSUPPORTED_ARCHIVE = (".rar", ".wps")
+_ARCHIVE_SUFFIXES = (".zip", ".tar", ".gz", ".tgz", ".7z", ".rar")
 
 
 class AttachmentError(Exception):
@@ -118,15 +126,47 @@ def _harden(dest: Path) -> int:
     return removed
 
 
+def _verify_output(dest: Path) -> bool:
+    """压缩炸弹复核：解压产物总字节或文件数超限 → True（调用方应整体丢弃）。"""
+    total = 0
+    count = 0
+    for p in dest.rglob("*"):
+        if not p.is_file() or p.is_symlink():
+            continue
+        count += 1
+        try:
+            total += p.stat().st_size
+        except OSError:
+            pass
+    return total > MAX_EXTRACT_TOTAL or count > MAX_FILES
+
+
+def _run_subprocess_limited(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
+    """运行外部解压命令，子进程写入总量受 RLIMIT_FSIZE 限制（压缩炸弹防线）。"""
+    preexec = None
+    if sys.platform.startswith("linux"):
+        def _limit() -> None:
+            import resource
+            resource.setrlimit(
+                resource.RLIMIT_FSIZE, (MAX_EXTRACT_TOTAL, MAX_EXTRACT_TOTAL))
+        preexec = _limit
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=timeout, preexec_fn=preexec)
+
+
 def _zip_safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     total = 0
+    count = 0
     for info in zf.infolist():
         name = info.filename
         if name.startswith(("/", "\\")) or ".." in Path(name).parts:
             raise AttachmentError(f"压缩包含危险路径条目，已拒绝: {name[:60]}")
         total += info.file_size
+        count += 1
         if total > MAX_EXTRACT_TOTAL:
             raise AttachmentError("解压总量超过上限，已中止")
+        if count > MAX_FILES:
+            raise AttachmentError("解压文件数超过上限，已中止")
         if info.is_dir():
             continue
         out = (dest / name).resolve()
@@ -138,10 +178,14 @@ def _zip_safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
 
 
 def _extract_one(path: Path, dest: Path) -> list[Path]:
-    """解压单个归档到 dest，返回解出的文件列表；不支持的类型返回空并在 error 注明。
+    """解压单个归档到 dest，返回解出的文件列表。
 
-    安全：所有解压（含 unrar/7z 外部工具）后执行 _harden 清理，防止
-    symlink/硬链接/路径穿越把文件写到解压目录之外。
+    安全防线（全格式统一）：
+      1) 路径穿越/链接条目：zip/tar 手动校验；7z 预检 is_symlink；
+      2) 压缩炸弹：zip/tar 逐条预算；7z 按成员 uncompressed 预算；
+         rar（外部 unrar/7z）子进程 RLIMIT_FSIZE 限写；
+      3) 收尾：_harden 清理链接/越界文件 + _verify_output 总量/文件数复核，
+         超限则整体丢弃。
     """
     suffix = path.suffix.lower()
     extracted: list[Path] = []
@@ -154,6 +198,7 @@ def _extract_one(path: Path, dest: Path) -> list[Path]:
             # 手动逐成员安全提取：拒绝链接/设备条目与路径穿越，不用 extractall
             with tarfile.open(path) as tf:
                 total = 0
+                count = 0
                 for member in tf.getmembers():
                     if member.issym() or member.islnk() or member.isdev():
                         raise AttachmentError(
@@ -162,8 +207,11 @@ def _extract_one(path: Path, dest: Path) -> list[Path]:
                     if name.startswith(("/", "\\")) or ".." in Path(name).parts:
                         raise AttachmentError(f"压缩包含危险路径条目，已拒绝: {name[:60]}")
                     total += member.size
+                    count += 1
                     if total > MAX_EXTRACT_TOTAL:
                         raise AttachmentError("解压总量超过上限，已中止")
+                    if count > MAX_FILES:
+                        raise AttachmentError("解压文件数超过上限，已中止")
                     out = (dest / name).resolve()
                     if not str(out).startswith(str(dest.resolve())):
                         raise AttachmentError(f"压缩包条目逃逸目录: {name[:60]}")
@@ -180,40 +228,51 @@ def _extract_one(path: Path, dest: Path) -> list[Path]:
         elif suffix == ".7z":
             try:
                 import py7zr
-                with py7zr.SevenZipFile(path) as sz:
-                    sz.extractall(dest)
-                extracted = [p for p in dest.rglob("*") if p.is_file()]
             except ImportError:
                 raise AttachmentError("未安装 py7zr，无法解压 .7z")
+            with py7zr.SevenZipFile(path) as sz:
+                # 事前预算 + symlink 预检（防 7z 炸弹/链接条目）
+                files = sz.list()
+                if len(files) > MAX_FILES:
+                    raise AttachmentError("7z 解压文件数超过上限，已中止")
+                budget = 0
+                for fi in files:
+                    if getattr(fi, "is_symlink", False):
+                        raise AttachmentError(f"7z 包含链接条目，已拒绝: {fi.filename[:60]}")
+                    budget += int(getattr(fi, "uncompressed", 0) or 0)
+                    if budget > MAX_EXTRACT_TOTAL:
+                        raise AttachmentError("7z 解压总量超过上限，已中止（疑似压缩炸弹）")
+                sz.extractall(dest)
+            extracted = [p for p in dest.rglob("*") if p.is_file()]
         elif suffix == ".rar":
             # 优先 RARLAB unrar（完整 RAR5 支持）；否则退回系统 7-Zip
             unrar = shutil.which("unrar") or shutil.which("unar")
-            import subprocess
             if unrar:
-                sub = subprocess.run(
-                    [unrar, "x", "-o+", str(path), f"{dest}{'/' if not str(dest).endswith('/') else ''}"],
-                    capture_output=True, text=True, timeout=300,
-                )
+                sub = _run_subprocess_limited(
+                    [unrar, "x", "-o+", str(path),
+                     f"{dest}{'/' if not str(dest).endswith('/') else ''}"])
                 if sub.returncode != 0:
                     raise AttachmentError(f"unrar 解压失败: {sub.stderr[:120] or '未知错误'}")
             else:
                 sevenzip = shutil.which("7z") or shutil.which("7za")
                 if not sevenzip:
                     raise AttachmentError("未安装 unrar/7-Zip，无法解压 .rar，需人工解压查看")
-                sub = subprocess.run(
-                    [sevenzip, "x", "-y", f"-o{dest}", str(path)],
-                    capture_output=True, text=True, timeout=300,
-                )
+                sub = _run_subprocess_limited(
+                    [sevenzip, "x", "-y", f"-o{dest}", str(path)])
                 if sub.returncode != 0:
-                    raise AttachmentError(f"7z 解压 .rar 失败（可能 RAR5 新方法，建议安装 unrar）: {sub.stderr[:120]}")
+                    raise AttachmentError(
+                        f"7z 解压 .rar 失败（可能 RAR5 新方法或超写入限额）: {sub.stderr[:120]}")
             extracted = [p for p in dest.rglob("*") if p.is_file()]
         else:
             raise AttachmentError(f"{suffix} 格式需 7-Zip/对应工具，当前环境未安装，需人工解压查看")
     finally:
-        # 外部工具（unrar/7z）及任何格式的兜底清理：删除链接与逃逸文件
+        # 收尾防线：清理链接/越界文件；总量/文件数复核，超限整体丢弃（压缩炸弹）
         removed = _harden(dest)
         if removed:
             raise AttachmentError(f"解压产物中发现并清除了 {removed} 个危险条目（链接/越界），已丢弃")
+        if _verify_output(dest):
+            shutil.rmtree(dest, ignore_errors=True)
+            raise AttachmentError("解压产物超过安全上限（总量/文件数），已整体丢弃（疑似压缩炸弹）")
     return extracted
 
 
@@ -227,7 +286,7 @@ def unpack_recursive(paths: list[Path], work: Path, depth: int = 0) -> tuple[lis
     readable: list[Path] = []
     problems: list[dict] = []
     for p in paths:
-        if p.suffix.lower() in (".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"):
+        if p.suffix.lower() in _ARCHIVE_SUFFIXES:
             sub = work / f"unpack_{p.stem[:20]}_{depth}"
             sub.mkdir(parents=True, exist_ok=True)
             try:

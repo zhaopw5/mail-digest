@@ -218,3 +218,11 @@ sudo apt-get install -y p7zip-full unrar libreoffice-writer libreoffice-calc
 > 真实风险场景：攻击者伪造「XX项目申报通知」邮件 → 主题命中关键词 → 若不设白名单，
 > 恶意 tar/rar 可能通过符号链接把文件写到项目目录（如覆盖 .env、.bashrc）。
 > 白名单 + 解压加固可阻断该链路。安全回归测试见 tests/test_local.py。
+
+### 压缩炸弹防护（补）
+
+- ZIP/TAR：解压前逐条目预算体积与文件数（`MAX_EXTRACT_TOTAL`=200MB、`MAX_FILES`=2000）
+- 7z：解压前按成员 `uncompressed` 预算 + 拒绝链接条目（py7zr）
+- RAR：外部 unrar/7z 子进程受 `RLIMIT_FSIZE` 写入限额约束（Linux）
+- 全格式解压后统一复核总量/文件数，超限整体丢弃并报告（`_verify_output`）
+- 安全回归测试：zip 穿越 / tar symlink / zip 炸弹 / 白名单（tests/test_local.py）
