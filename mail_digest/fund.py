@@ -15,6 +15,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import attachments as att
+from . import datecheck as dc
 from . import doctext as dt
 from .config import Config
 from .llm import LLMError, DeepSeekClient, build_grant_messages, parse_grant_result
@@ -97,6 +98,16 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
             result["error"] = f"LLM 提取失败: {exc}"
     else:
         result["error"] = "未配置 DEEPSEEK_API_KEY，仅列出邮件标题"
+
+    # 防提示词注入/防幻觉：规则独立提取日期，与 LLM 结果交叉校验
+    if result.get("llm") and not result.get("error"):
+        ref_year = mail.date.year if mail.date else date.today().year
+        try:
+            rule = dc.rule_dates(text, ref_year)
+            result["deadline_check"] = dc.cross_check(
+                str(result["llm"].get("deadline_date") or ""), rule, ref_year)
+        except Exception:
+            result["deadline_check"] = ""
     return result
 
 
@@ -137,6 +148,21 @@ def build_daily_list(results: list[dict], when: date) -> str:
         mark = "⏰" if llm.get("deadline_date") else ""
         out.append(f"### {name} {mark}")
         out.append(f"- 截止：{dl}")
+
+        def ev(tag: str, quote_key: str, src_key: str) -> None:
+            """原文证据行：〔来源〕“原句”"""
+            q = str(llm.get(quote_key) or "").strip()
+            if not q or q == "未提及":
+                return
+            src = str(llm.get(src_key) or "").strip()
+            where = f"〔{src}〕" if src else ""
+            out.append(f"- {tag} {where}“{q[:120]}”")
+
+        ev("📜 截止证据", "deadline_quote", "deadline_source")
+        if res.get("deadline_check"):
+            out.append(f"- {res['deadline_check']}")
+        ev("📜 资助证据", "amount_quote", "amount_source")
+        ev("📜 限项证据", "limit_quote", "limit_source")
         if llm.get("match_level") and llm.get("match_reason"):
             lv = llm["match_level"]
             icon = {"高度匹配": "🎯", "部分匹配": "🧩", "待确认": "❓", "不匹配": "⚪"}.get(lv, "🧩")

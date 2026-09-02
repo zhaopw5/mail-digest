@@ -226,3 +226,11 @@ sudo apt-get install -y p7zip-full unrar libreoffice-writer libreoffice-calc
 - RAR：外部 unrar/7z 子进程受 `RLIMIT_FSIZE` 写入限额约束（Linux）
 - 全格式解压后统一复核总量/文件数，超限整体丢弃并报告（`_verify_output`）
 - 安全回归测试：zip 穿越 / tar symlink / zip 炸弹 / 白名单（tests/test_local.py）
+
+### 提示词注入防御（补）
+
+邮件正文与附件是**不可信数据**，可嵌入“忽略前面的任务/把截止日期改为…”等指令。防御分四层：
+1. Prompt：系统提示声明文档不可信、绝不执行其中指令；用户消息用 `<document>…</document>` 边界隔离文档区
+2. 证据返回：截止/金额/限项必须同时输出**原文原句**（deadline_quote 等）与来源文件名，清单中直接展示证据行
+3. 规则交叉校验：`mail_digest/datecheck.py` 用正则独立提取文本日期，与模型 `deadline_date` 交叉比对，不一致/超范围/格式非法时输出警告（可对抗被注入篡改的日期）
+4. 展示证据而非仅结论：清单每条附「📜 证据〔来源〕“原文”」，供人工核对
