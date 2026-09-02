@@ -135,6 +135,28 @@ def _extract_one(path: Path, dest: Path) -> list[Path]:
             extracted = [p for p in dest.rglob("*") if p.is_file()]
         except ImportError:
             raise AttachmentError("未安装 py7zr，无法解压 .7z")
+    elif suffix == ".rar":
+        # 优先 RARLAB unrar（完整 RAR5 支持）；否则退回系统 7-Zip
+        unrar = shutil.which("unrar") or shutil.which("unar")
+        import subprocess
+        if unrar:
+            sub = subprocess.run(
+                [unrar, "x", "-o+", str(path), f"{dest}{'/' if not str(dest).endswith('/') else ''}"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if sub.returncode != 0:
+                raise AttachmentError(f"unrar 解压失败: {sub.stderr[:120] or '未知错误'}")
+        else:
+            sevenzip = shutil.which("7z") or shutil.which("7za")
+            if not sevenzip:
+                raise AttachmentError("未安装 unrar/7-Zip，无法解压 .rar，需人工解压查看")
+            sub = subprocess.run(
+                [sevenzip, "x", "-y", f"-o{dest}", str(path)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if sub.returncode != 0:
+                raise AttachmentError(f"7z 解压 .rar 失败（可能 RAR5 新方法，建议安装 unrar）: {sub.stderr[:120]}")
+        extracted = [p for p in dest.rglob("*") if p.is_file()]
     else:
         raise AttachmentError(f"{suffix} 格式需 7-Zip/对应工具，当前环境未安装，需人工解压查看")
     return extracted
@@ -150,7 +172,7 @@ def unpack_recursive(paths: list[Path], work: Path, depth: int = 0) -> tuple[lis
     readable: list[Path] = []
     problems: list[dict] = []
     for p in paths:
-        if p.suffix.lower() in (".zip", ".tar", ".gz", ".tgz", ".7z"):
+        if p.suffix.lower() in (".zip", ".tar", ".gz", ".tgz", ".7z", ".rar"):
             sub = work / f"unpack_{p.stem[:20]}_{depth}"
             sub.mkdir(parents=True, exist_ok=True)
             try:

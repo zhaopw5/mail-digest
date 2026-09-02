@@ -184,3 +184,18 @@
    ```
 5. 产物：英文/中文简报在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
    本地测试：`python3 tests/test_local.py`（无网络）。
+
+## 12. 可选系统依赖（提升基金附件解析覆盖）
+
+场景二（附件解析）核心为纯 Python（zipfile/tarfile/py7zr/docx/pdf/xlsx），
+以下**系统工具**可显著提升覆盖，缺装时对应格式会在清单中标注「需人工查看」：
+
+```bash
+sudo apt-get install -y p7zip-full unrar libreoffice-writer libreoffice-calc
+```
+
+| 工具 | 作用 |
+|---|---|
+| p7zip-full（7z） | 解压部分 .rar（旧版方法） |
+| unrar | 解压 RAR5 等新方法 .rar（推荐装） |
+| libreoffice | 老版 .doc / .wps / 误命名的 .xls 等 → 文本转换 |
