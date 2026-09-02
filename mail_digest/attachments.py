@@ -183,6 +183,9 @@ def unpack_recursive(paths: list[Path], work: Path, depth: int = 0) -> tuple[lis
                 problems.extend(pr)
             except (AttachmentError, zipfile.BadZipFile, tarfile.TarError) as exc:
                 problems.append({"file": p.name, "error": str(exc)})
+                # 部分失败（如 rar 内个别文件名超长）时，已解出的文件仍保留可用
+                partial = [q for q in sub.rglob("*") if q.is_file()]
+                readable.extend(partial)
         else:
             readable.append(p)
     return readable, problems
