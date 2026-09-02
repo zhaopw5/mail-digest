@@ -1,0 +1,13 @@
+# 敏感配置与运行产物（含个人/邮件信息，禁止提交）
+.env
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.vscode/
+.idea/

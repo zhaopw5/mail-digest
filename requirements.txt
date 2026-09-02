@@ -1,0 +1,2 @@
+# 本项目零第三方运行时依赖（纯标准库：imaplib / email / urllib / json）。
+# 如需跑测试辅助工具（pytest 等）可自行安装。

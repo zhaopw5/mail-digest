@@ -1,0 +1,186 @@
+# 📧 邮件智能摘要 Agent（暂定名）
+
+> 每天自动读取腾讯企业邮箱，把「正文 + 链接里的内容 + 附件里的内容」聚合起来，按个人偏好过滤、判断重要度、生成摘要，推送给用户。
+> 一句话定位：**邮件驱动的个人信息聚合器**——正文只是入口，真正的内容在链接里、在附件里。
+
+---
+
+## 1. 项目背景
+
+用户每天收到大量邮件但懒得读，又怕错过重要的。现成的"AI 邮箱"（网易邮箱大师 AI、Gmail/Outlook 内置摘要等）只能总结**邮件正文**，而用户实际需要的内容恰恰在正文之外：
+
+- **场景一**：NASA ADS 文献订阅推送——邮件里只有标题和链接，摘要页的内容在网页上，邮箱内置 AI 读不到；
+- **场景二**：学院发的基金申请 / 项目申请通知——正文只说"这是什么领域的项目"，实际内容（申报书、指南、通知全文）全在**附件**（含压缩包）里，邮箱内置 AI 读不到附件。
+
+所以这个项目的核心价值 = **内容富化（链接抓取 + 附件解析）+ AI 摘要**，而不是简单的正文摘要。
+
+## 2. 核心场景（需求定义）
+
+### 场景一：NASA ADS 文献推送
+
+- **现状**：每 1~几天收到一封 ADS 订阅推送，邮件列出若干条文献，每条只有标题 + 链接（形如 `https://ui.adsabs.harvard.edu/abs/<bibcode>/abstract`），点链接才能看到摘要。
+- **目标**：agent 自动提取 bibcode → 调 NASA ADS 官方 API 拿到结构化摘要 → 按用户研究方向打分 → 进每日汇总。
+- **期望产出**：每天/每周一封文献简报，包含标题、摘要、引用数、相关度，直接可读，不用再点链接。
+
+### 场景二：学院基金 / 项目申请邮件
+
+- **现状**：邮件正文只有领域简介，详细内容在附件里，附件可能是 PDF / Word / 压缩包（压缩包里可能还有压缩包）。
+- **目标**：agent 自动下载附件 → 解压（递归）→ 解析各类文档 → 提取关键信息（申报条件、截止日期、资助额度、材料清单等）→ 进每日汇总。
+- **期望产出**：每天一页"项目申报机会清单"，标明截止日期和核心要求，不漏项。
+
+## 3. 为什么自建而不是用现成产品
+
+- **海外工具**（Superhuman、Shortwave、SaneBox、Mailbutler 等）：基本只支持 Gmail / Outlook 生态，不支持腾讯企业邮箱。
+- **国内厂商**（网易邮箱大师 AI、WPS 365、Coremail）：AI 是"邮箱内置功能"，只能在邮箱界面里用，且只读正文，覆盖不了上面两个场景。
+- **"腾讯企业邮箱 + 自动聚合正文/链接/附件 + 每日推送"** 目前没有现成产品。
+- **定位**：自用 / 学习项目，暂不商业化（商业化赛道拥挤且获客难，但自用价值成立）。
+
+## 4. 总体架构
+
+```
+┌────────────┐   ┌──────────────────────────────┐   ┌──────────────┐   ┌────────────┐
+│  IMAP 拉信  │ → │       内容富化层（核心差异化）      │ → │ LLM 过滤+摘要  │ → │  每日推送    │
+│ 腾讯企业邮箱  │   │  正文提取 / 链接抓取 / 附件解析    │   │ 重要度判定     │   │ 邮件/飞书等   │
+└────────────┘   └──────────────────────────────┘   └──────────────┘   └────────────┘
+```
+
+关键点：**内容富化层是本项目的差异化核心**，LLM 摘要只是最后一公里。
+
+## 5. 技术方案细节
+
+### 5.1 数据接入：腾讯企业邮箱
+
+- **重要事实**：腾讯企业邮箱官方 OpenAPI 只有管理类接口（部门、成员、邮件组、标签、SSO、日志等），**不能读邮件内容**。读邮件必须走标准邮件协议。
+- **IMAP 收信**：服务器 `imap.exmail.qq.com`，端口 `993`（SSL），用户名 = 完整邮箱地址。
+- **SMTP 发信**（如需 agent 代发）：`smtp.exmail.qq.com`，端口 `465`（SSL）。
+- **登录方式**：**16 位授权码**，不是邮箱密码。获取路径：邮箱设置 → 客户端设置 → 【获取授权密码】。授权码可随时重置作废。
+- 参考：[什么是授权码（官方帮助）](https://exmail.qq.com/qy_mng_logic/help/authcodeSetting)
+- **注意**：如果公司用企业微信，邮箱通常已与企业微信打通，可作为备选集成入口。
+
+### 5.2 内容富化层
+
+#### ADS 摘要抓取（场景一）
+
+- 从邮件正文 / HTML 中提取 bibcode（19 位，正则形如 `\d{4}[A-Za-z&.+]{5}\.[A-Za-z0-9]{4}[A-Za-z]`，示例 `2024ApJ...963..100A`）。
+- 调 NASA ADS 官方 API（比爬网页干净、无反爬问题）：
+  - `GET https://api.adsabs.harvard.edu/v1/search/query?q=bibcode:<bibcode>&fl=title,abstract,author,bibcode,citation_count,doi`
+  - 认证：`Authorization: Bearer <ADS_API_TOKEN>`，token 在 [ADS 账号设置页](https://ui.adsabs.harvard.edu/user/settings/token) 免费生成，不过期。
+  - 限额：3000 次/天，15 次/秒（超限返回 HTTP 429）。
+- 可选增强：按用户研究方向关键词（如 `gravitational waves`）对摘要做相关度打分，过滤低相关文献。
+- 参考：[ADS API 官方文档](https://ui.adsabs.harvard.edu/help/api/)，社区已有 [ADS MCP server](https://github.com/cbyrohl/mcp-server-ads) 可借鉴。
+
+#### 附件解析（场景二）
+
+| 附件类型 | 处理方式 |
+|---|---|
+| .zip / .tar / .gz / .7z | 解压；**注意递归解压**（压缩包里可能还有压缩包）；.rar/.7z 建议用 7z 命令行统一处理 |
+| .pdf | `pypdf` / `pdfplumber` 提取文本 |
+| .docx | `python-docx` |
+| .doc（老格式） | 先经 LibreOffice 转成 .docx 再解析 |
+| .xlsx / .csv | `openpyxl` / pandas |
+| 扫描版 PDF | OCR（如 PaddleOCR），识别率不保证，记录报告 |
+
+- 提取重点字段（按场景二需求）：项目名称、领域、**截止日期**、申报条件、资助额度、材料清单。
+- 失败处理原则：**能读的读，读不了的明确报告**——例如"附件是加密压缩包，需手动查看"，不允许静默失败。
+
+### 5.3 LLM 摘要与过滤
+
+- 输入：一封邮件的「正文 + 链接内容 + 附件解析结果」。
+- 输出：结构化摘要（标题、来源、核心内容、重要度 1-5、截止日期/关键字段、原文链接）。
+- 防幻觉：关键字段（日期、金额、数字）要求**原样引用原文**，摘要附原文出处链接。
+- 过滤规则可配置：研究方向关键词、发件人白名单/黑名单、邮件类型。
+
+### 5.4 每日调度与推送
+
+- 定时：cron / APScheduler，每天固定时间跑（例如早上 8 点）。
+- 推送渠道候选：邮件（把汇总发给自己 / 指定地址）、飞书/企业微信/钉钉 webhook。
+- 增量处理：只处理新邮件，已处理过的跳过（幂等）。
+
+## 6. 技术栈选型（建议）
+
+**方案 A：Python（推荐，生态最全）**
+
+- 收信：`imaplib` + `email`（标准库）或 `imapclient`
+- 文档解析：`pypdf` / `pdfplumber` / `python-docx` / `openpyxl` / `py7zr` 或 `patool`
+- LLM：`openai` / `anthropic` SDK（或走兼容网关）
+- 调度：cron（简单）或 `APScheduler`（进程内）
+
+**方案 B：Node.js**
+
+- 收信：`imapflow`；解析：`pdf-parse`、`docx`、`archiver`/`yauzl`
+
+> 不强制，开工时二选一即可。
+
+## 7. 关键工程要点（坑清单）
+
+1. **授权码安全**：不硬编码，放环境变量 / 配置文件中，权限收紧；出事可一键作废重发。
+2. **幂等**：记录已处理邮件 ID（UID），避免重复处理和重复烧 token。
+3. **成本控制**：先做规则过滤（发件人、关键词、域名），再送 LLM；只对"值得看"的邮件做摘要；附件解析结果可缓存。
+4. **失败重试与可见性**：拉信失败、API 429、附件解析失败都要有重试 + 日志 + 最终报告，不能让用户"以为没有新邮件"。
+5. **附件安全**：解压路径穿越防护、文件名清洗、大小上限（超大附件截断并报告）。
+6. **隐私**：数据尽量本地处理，token 不外泄，不把整封邮件原文推送到第三方。
+7. **授权状态**：IMAP 授权码失效（重置后）要能自动告警。
+
+## 8. 开发路线图（Milestone）
+
+| 里程碑 | 内容 | 验收标准 |
+|---|---|---|
+| **M0 Spike** | 授权码 + IMAP 拉最近 50 封真实邮件，输出到本地 | 能列出邮件标题/发件人/时间，正文可读 |
+| **M1 场景一** | ADS bibcode 提取 + API 查摘要，产出文献简报 | 一封 ADS 推送邮件 → 自动输出每条文献的标题+摘要 |
+| **M2 场景二** | 附件下载 + 递归解压 + 文档解析 | 一封带压缩附件的邮件 → 输出附件内文档的文本 |
+| **M3 LLM 层** | 过滤 + 重要度 + 结构化摘要 | 对真实邮件输出结构化摘要，人工抽查准确率 |
+| **M4 自动化** | 每日定时 + 推送（邮件/飞书） | 无人值守跑 3 天，不漏、不重 |
+| **M5 打磨** | 相关度打分、规则配置、去重、反馈改进 | 摘要质量稳定，使用体验顺手 |
+
+> 建议从 M0 开始，M0 一天内可完成——它是验证"这条路通不通"的关键，也决定后续所有假设。
+
+## 9. 参考文档
+
+- [腾讯企业邮箱：什么是授权码](https://exmail.qq.com/qy_mng_logic/help/authcodeSetting)
+- [腾讯企业邮箱 OpenApi 协议 v1.4（管理类接口，不读邮件内容）](https://exmail.qq.com/cgi-bin/download?path=bizopenapidoc&filename=%cc%da%d1%b6%c6%f3%d2%b5%d3%ca%cf%e4OpenApi%d0%ad%d2%e9v1.4.pdf)
+- [NASA ADS API 官方文档](https://ui.adsabs.harvard.edu/help/api/)
+- [NASA ADS API Token 申请](https://ui.adsabs.harvard.edu/user/settings/token)
+- [ADS MCP server（社区实现，可借鉴）](https://github.com/cbyrohl/mcp-server-ads)
+- [IMAP MCP server（通用邮件 MCP 方案）](https://www.npmjs.com/package/@timecyber/universal-email-mcp)
+
+## 10. 决策记录（已确认）与待办
+
+> 2026-09-01 与用户确认，开放问题已收敛为决策，开工不再阻塞。
+
+| 问题 | 决策 |
+|---|---|
+| 推送渠道 | 发邮件给自己（零配置；后期可换飞书/企业微信 webhook） |
+| ADS 过滤 | 先不过滤，全部收进来；跑通后再按关键词/作者/期刊过滤 |
+| 运行环境 | 本地电脑定时跑（系统计划任务） |
+| 处理范围 | 只看最近 N 封 / 新邮件，增量处理（按 UID 幂等） |
+| LLM 选型 | DeepSeek（M3 才接入；国内直连） |
+| 汇总频率 | **分场景两封**：ADS 文献单独一封、项目申报机会单独一封 |
+
+**待用户提供（跑真实数据所需）**：
+- 腾讯企业邮箱 16 位授权码 → 填 `.env` 的 `IMAP_AUTH_CODE`
+- NASA ADS API token → 填 `.env` 的 `ADS_API_TOKEN`（[申请页](https://ui.adsabs.harvard.edu/user/settings/token)，免费，不过期）
+
+**实施状态**：项目一（ADS 文献推送）M0 + M1 已完成骨架并通过本地测试（`main.py` + `mail_digest/`，零第三方依赖），等待凭据后跑真实数据。
+
+## 11. 快速开始（开源使用）
+
+1. **配置**：`cp .env.example .env`，填写
+   - `IMAP_USER` / `IMAP_AUTH_CODE`（邮箱地址 + 客户端授权码，见 .env.example 注释）
+   - `ADS_API_TOKEN`（[NASA ADS 申请](https://ui.adsabs.harvard.edu/user/settings/token)，免费）
+   - `DEEPSEEK_API_KEY`（可选，启用中文翻译/点评/分级，[DeepSeek 申请](https://platform.deepseek.com)）
+2. **个性化（可选）**：`cp research_profile.example.json data/research_profile.json` 并编辑，
+   LLM 点评与相关性分级将贴合你的研究方向。
+3. **运行**（均在本项目目录下）：
+   ```bash
+   python3 main.py fetch --recent 50   # 拉取最近邮件到 data/emails
+   python3 main.py ads                 # ADS 推送 → 英文 + 中文简报（含点评/分级）
+   python3 main.py html                # 生成合并 HTML 总览
+   python3 main.py push                # 把当天简报用邮件发给自己
+   python3 main.py all                 # 一键：fetch + ads
+   ```
+4. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点：
+   ```cron
+   0 9 * * * cd /path/to/this/project && python3 main.py all && python3 main.py html && python3 main.py push
+   ```
+5. 产物：英文/中文简报在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
+   本地测试：`python3 tests/test_local.py`（无网络）。
