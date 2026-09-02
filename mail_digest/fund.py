@@ -167,10 +167,24 @@ def build_daily_list(results: list[dict], when: date) -> str:
 
 def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
              limit: int | None = None) -> tuple[int, str | None]:
-    """处理基金邮件，返回 (处理封数, 当日清单文本 or None)。"""
+    """处理基金邮件，返回 (处理封数, 当日清单文本 or None)。
+
+    安全：只处理可信发件人（cfg.grant_allowed_senders 白名单）的邮件附件，
+    其余跳过——防止攻击者用伪造的「申报通知」投递恶意压缩包。
+    """
+    from .config import sender_allowed
     processed = _load_ids(cfg.data_dir / "processed_fund.json")
     cache = _load_cache(cfg.data_dir / "fund_cache.json")
     todo = [m for m in grant_mails if force or m.uid not in processed]
+    if not cfg.grant_allowed_senders.strip():
+        print("⚠️  未配置 GRANT_ALLOWED_SENDERS（可信发件人白名单）——为防恶意附件，"
+              "跳过全部基金邮件附件处理。请在 .env 配置，如：GRANT_ALLOWED_SENDERS=*@mail.sysu.edu.cn")
+        return 0, None
+    trusted = [m for m in todo if sender_allowed(m.from_, cfg.grant_allowed_senders)]
+    skipped = len(todo) - len(trusted)
+    if skipped:
+        print(f"⏭️  跳过 {skipped} 封非可信发件人的邮件（不做附件处理，防恶意压缩包）")
+    todo = trusted
     if limit and len(todo) > limit:
         todo = todo[:limit]
     if not todo:

@@ -100,6 +100,66 @@ def test_parse_myads_sections() -> None:
     assert subscription_label("unknown_sub") == "unknown_sub"
 
 
+# ---------------- 安全回归：恶意压缩包与白名单 ----------------
+
+def test_zip_path_traversal_blocked() -> None:
+    """zip 含 ../ 条目必须被拒绝，且不得写穿到目录外。"""
+    import tempfile
+    import zipfile
+    from mail_digest.attachments import AttachmentError, _extract_one
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        zpath = root / "evil.zip"
+        with zipfile.ZipFile(zpath, "w") as zf:
+            zf.writestr("../../evil_escape.txt", "pwned")
+        dest = root / "out"
+        try:
+            _extract_one(zpath, dest)
+            raise AssertionError("应当拒绝路径穿越 zip")
+        except AttachmentError:
+            pass
+        assert not (root.parent / "evil_escape.txt").exists(), "zip 逃逸文件不得出现"
+        assert not (dest / ".." / "evil_escape.txt").exists()
+
+
+def test_tar_symlink_blocked() -> None:
+    """tar 含 symlink 条目必须被拒绝（防覆盖 .env/.bashrc 等已知路径）。"""
+    import tarfile
+    import tempfile
+    from mail_digest.attachments import AttachmentError, _extract_one
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        tpath = root / "evil.tar"
+        with tarfile.open(tpath, "w") as tf:
+            info = tarfile.TarInfo("evil_link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc"
+            tf.addfile(info)
+        dest = root / "out"
+        try:
+            _extract_one(tpath, dest)
+            raise AssertionError("应当拒绝含链接条目的 tar")
+        except AttachmentError:
+            pass
+        assert not (dest / "evil_link").exists(), "符号链接不得落盘"
+
+
+def test_sender_allowlist() -> None:
+    """可信发件人白名单匹配（fail-closed：空白名单拒绝一切）。"""
+    from mail_digest.config import sender_allowed
+
+    f = "孙姗珍 <sshanzh@mail.sysu.edu.cn>"
+    assert sender_allowed(f, "sshanzh@mail.sysu.edu.cn")          # 完整地址
+    assert sender_allowed(f, "*@mail.sysu.edu.cn")                # 域名通配
+    assert sender_allowed(f, "mail.sysu.edu.cn")                  # 裸域名
+    assert not sender_allowed(f, "")                               # 空 → 拒绝
+    assert not sender_allowed(f, "sshanzh@evil.com")
+    assert not sender_allowed(f, "*@evil.com")
+    assert not sender_allowed("攻击者 <attacker@example.org>", "*@mail.sysu.edu.cn")
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -107,4 +167,7 @@ if __name__ == "__main__":
     test_bare_bibcode_in_text()
     test_build_digest()
     test_parse_myads_sections()
-    print("✅ 全部本地测试通过")
+    test_zip_path_traversal_blocked()
+    test_tar_symlink_blocked()
+    test_sender_allowlist()
+    print("✅ 全部本地测试通过（含安全回归）")

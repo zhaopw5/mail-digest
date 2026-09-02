@@ -199,3 +199,22 @@ sudo apt-get install -y p7zip-full unrar libreoffice-writer libreoffice-calc
 | p7zip-full（7z） | 解压部分 .rar（旧版方法） |
 | unrar | 解压 RAR5 等新方法 .rar（推荐装） |
 | libreoffice | 老版 .doc / .wps / 误命名的 .xls 等 → 文本转换 |
+
+## 13. 安全说明（重要）
+
+本项目会**自动下载并解压邮件附件**，存在被钓鱼邮件投递恶意压缩包的风险。
+两道防线：
+
+1. **可信发件人白名单**：`GRANT_ALLOWED_SENDERS`（.env）
+   - 只有白名单内发件人的基金邮件才做附件解压；其他一律跳过并提示。
+   - 支持 `完整地址` / `*@域名` / `裸域名`，逗号分隔；**留空 = 拒绝一切**（fail-closed）。
+   - 例：`GRANT_ALLOWED_SENDERS=*@mail.sysu.edu.cn`（只信任本校域名邮件）
+2. **解压加固**（mail_digest/attachments.py）
+   - zip/tar 手动安全提取：拒绝 `..` 路径、绝对路径、符号链接/硬链接/设备条目；
+   - 外部工具（unrar/7z）解压后强制清理链接与越界文件（`_harden`）；
+   - 单附件大小、解压总量、嵌套层数均有上限；
+   - 附件文件名解码 + 限长，防目录穿越与超长文件名。
+
+> 真实风险场景：攻击者伪造「XX项目申报通知」邮件 → 主题命中关键词 → 若不设白名单，
+> 恶意 tar/rar 可能通过符号链接把文件写到项目目录（如覆盖 .env、.bashrc）。
+> 白名单 + 解压加固可阻断该链路。安全回归测试见 tests/test_local.py。

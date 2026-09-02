@@ -93,6 +93,31 @@ def extract_attachments(mail: Mail, dest: Path,
     return results
 
 
+def _harden(dest: Path) -> int:
+    """解压后清理：删除符号链接、硬链接及逃逸出 dest 的文件（安全兜底）。
+
+    即使 zip/tar 校验漏过、或 unrar/7z 产生了链接条目，也不让后续代码
+    跟随链接读取/写入 dest 之外（如 .env、.bashrc）。返回删除数。
+    """
+    removed = 0
+    for p in dest.rglob("*"):
+        try:
+            if p.is_symlink() or (p.is_file() and p.stat().st_nlink > 1):
+                p.unlink(missing_ok=True)
+                removed += 1
+                continue
+            if not p.resolve().is_relative_to(dest.resolve()):
+                p.unlink(missing_ok=True)
+                removed += 1
+        except OSError:
+            try:
+                p.unlink(missing_ok=True)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def _zip_safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     total = 0
     for info in zf.infolist():
@@ -113,52 +138,82 @@ def _zip_safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
 
 
 def _extract_one(path: Path, dest: Path) -> list[Path]:
-    """解压单个归档到 dest，返回解出的文件列表；不支持的类型返回空并在 error 注明。"""
+    """解压单个归档到 dest，返回解出的文件列表；不支持的类型返回空并在 error 注明。
+
+    安全：所有解压（含 unrar/7z 外部工具）后执行 _harden 清理，防止
+    symlink/硬链接/路径穿越把文件写到解压目录之外。
+    """
     suffix = path.suffix.lower()
     extracted: list[Path] = []
-    if suffix in (".zip",):
-        with zipfile.ZipFile(path) as zf:
-            _zip_safe_extract(zf, dest)
-        extracted = [p for p in dest.rglob("*") if p.is_file()]
-    elif suffix in (".tar", ".gz", ".tgz"):
-        with tarfile.open(path) as tf:
-            for member in tf.getmembers():
-                if member.name.startswith("/") or ".." in Path(member.name).parts:
-                    raise AttachmentError(f"压缩包含危险路径条目，已拒绝: {member.name[:60]}")
-            tf.extractall(dest)
-        extracted = [p for p in dest.rglob("*") if p.is_file()]
-    elif suffix == ".7z":
-        try:
-            import py7zr
-            with py7zr.SevenZipFile(path) as sz:
-                sz.extractall(dest)
+    try:
+        if suffix in (".zip",):
+            with zipfile.ZipFile(path) as zf:
+                _zip_safe_extract(zf, dest)
             extracted = [p for p in dest.rglob("*") if p.is_file()]
-        except ImportError:
-            raise AttachmentError("未安装 py7zr，无法解压 .7z")
-    elif suffix == ".rar":
-        # 优先 RARLAB unrar（完整 RAR5 支持）；否则退回系统 7-Zip
-        unrar = shutil.which("unrar") or shutil.which("unar")
-        import subprocess
-        if unrar:
-            sub = subprocess.run(
-                [unrar, "x", "-o+", str(path), f"{dest}{'/' if not str(dest).endswith('/') else ''}"],
-                capture_output=True, text=True, timeout=300,
-            )
-            if sub.returncode != 0:
-                raise AttachmentError(f"unrar 解压失败: {sub.stderr[:120] or '未知错误'}")
+        elif suffix in (".tar", ".gz", ".tgz"):
+            # 手动逐成员安全提取：拒绝链接/设备条目与路径穿越，不用 extractall
+            with tarfile.open(path) as tf:
+                total = 0
+                for member in tf.getmembers():
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise AttachmentError(
+                            f"压缩包含链接/设备条目，已拒绝: {member.name[:60]}")
+                    name = member.name
+                    if name.startswith(("/", "\\")) or ".." in Path(name).parts:
+                        raise AttachmentError(f"压缩包含危险路径条目，已拒绝: {name[:60]}")
+                    total += member.size
+                    if total > MAX_EXTRACT_TOTAL:
+                        raise AttachmentError("解压总量超过上限，已中止")
+                    out = (dest / name).resolve()
+                    if not str(out).startswith(str(dest.resolve())):
+                        raise AttachmentError(f"压缩包条目逃逸目录: {name[:60]}")
+                    if member.isdir():
+                        out.mkdir(parents=True, exist_ok=True)
+                        continue
+                    out.parent.mkdir(parents=True, exist_ok=True)
+                    src = tf.extractfile(member)
+                    if src is None:
+                        continue
+                    with src, open(out, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+            extracted = [p for p in dest.rglob("*") if p.is_file()]
+        elif suffix == ".7z":
+            try:
+                import py7zr
+                with py7zr.SevenZipFile(path) as sz:
+                    sz.extractall(dest)
+                extracted = [p for p in dest.rglob("*") if p.is_file()]
+            except ImportError:
+                raise AttachmentError("未安装 py7zr，无法解压 .7z")
+        elif suffix == ".rar":
+            # 优先 RARLAB unrar（完整 RAR5 支持）；否则退回系统 7-Zip
+            unrar = shutil.which("unrar") or shutil.which("unar")
+            import subprocess
+            if unrar:
+                sub = subprocess.run(
+                    [unrar, "x", "-o+", str(path), f"{dest}{'/' if not str(dest).endswith('/') else ''}"],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if sub.returncode != 0:
+                    raise AttachmentError(f"unrar 解压失败: {sub.stderr[:120] or '未知错误'}")
+            else:
+                sevenzip = shutil.which("7z") or shutil.which("7za")
+                if not sevenzip:
+                    raise AttachmentError("未安装 unrar/7-Zip，无法解压 .rar，需人工解压查看")
+                sub = subprocess.run(
+                    [sevenzip, "x", "-y", f"-o{dest}", str(path)],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if sub.returncode != 0:
+                    raise AttachmentError(f"7z 解压 .rar 失败（可能 RAR5 新方法，建议安装 unrar）: {sub.stderr[:120]}")
+            extracted = [p for p in dest.rglob("*") if p.is_file()]
         else:
-            sevenzip = shutil.which("7z") or shutil.which("7za")
-            if not sevenzip:
-                raise AttachmentError("未安装 unrar/7-Zip，无法解压 .rar，需人工解压查看")
-            sub = subprocess.run(
-                [sevenzip, "x", "-y", f"-o{dest}", str(path)],
-                capture_output=True, text=True, timeout=300,
-            )
-            if sub.returncode != 0:
-                raise AttachmentError(f"7z 解压 .rar 失败（可能 RAR5 新方法，建议安装 unrar）: {sub.stderr[:120]}")
-        extracted = [p for p in dest.rglob("*") if p.is_file()]
-    else:
-        raise AttachmentError(f"{suffix} 格式需 7-Zip/对应工具，当前环境未安装，需人工解压查看")
+            raise AttachmentError(f"{suffix} 格式需 7-Zip/对应工具，当前环境未安装，需人工解压查看")
+    finally:
+        # 外部工具（unrar/7z）及任何格式的兜底清理：删除链接与逃逸文件
+        removed = _harden(dest)
+        if removed:
+            raise AttachmentError(f"解压产物中发现并清除了 {removed} 个危险条目（链接/越界），已丢弃")
     return extracted
 
 
