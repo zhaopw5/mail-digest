@@ -134,3 +134,52 @@ def parse_article_result(raw: dict, bibcode: str) -> dict:
         "note": str(raw.get("note", "") or "").strip(),
         "grade": grade,
     }
+
+
+# ---------------- 场景二：基金/项目申报通知结构化提取 ----------------
+
+GRANT_FIELDS = (
+    "project_name", "field", "deadline", "deadline_date",
+    "amount", "eligibility", "materials", "notes", "applicable",
+)
+
+
+def build_grant_messages(subject: str, sender: str, date_str: str, text: str) -> list[dict]:
+    """构造「一封基金通知 → 申报机会结构化 JSON」的对话消息。
+
+    text 为邮件正文 + 附件合并文本（已在调用方截断）。
+    """
+    system = (
+        "你是高校科研管理助理，熟悉国家自然科学基金、省部级科技计划等各类项目申报。"
+        "你的任务：从学院转发的基金/项目申报通知中抽取关键申报信息。"
+    )
+    user = f"""下面是学院转发的一封项目申报通知（正文+附件文本，附件已按文件名分段）。
+
+【邮件信息】
+主题: {subject or '(无)'}
+发件人: {sender or '(未知)'}
+邮件日期: {date_str or '(未知)'}
+
+【通知文本】
+{text or '(空)'}
+
+【输出要求】只输出一个 JSON 对象，不要输出其他任何文字：
+{{
+  "project_name": "项目/专项名称（简短）",
+  "field": "所属领域（如 信息科学、化学、地球科学），未知则空字符串",
+  "deadline": "截止日期，尽量原样引用原文（如 2026年9月30日17:00）；找不到写 未知",
+  "deadline_date": "截止日期的 ISO 格式 YYYY-MM-DD；无法确定写空字符串",
+  "amount": "资助额度/经费支持（如 单项资助不超过200万元）；未提及写 未提及",
+  "eligibility": "申报条件要点，压缩到120字以内；未提及写 未提及",
+  "materials": "申报材料清单要点，压缩到120字以内；未提及写 未提及",
+  "notes": "其他必须注意的关键要求（限项、校内截止、登录系统等），压缩到100字以内",
+  "applicable": true或false —— 该申报机会对「博士后身份的研究人员」是否大概率可申报"
+}}
+规则：日期、金额、限项数等关键信息必须忠实引用原文，禁止编造；附件与正文矛盾时以附件指南/通知为准；
+文本中没有的信息一律写 未提及/空，不要猜测。"""
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def parse_grant_result(raw: dict) -> dict:
+    """归一化基金提取结果，保证字段齐全。"""
+    return {k: raw.get(k, "" if k != "applicable" else False) for k in GRANT_FIELDS}

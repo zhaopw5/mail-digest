@@ -18,7 +18,8 @@ class Mail:
     body_text: str                  # 纯文本正文（已解码）
     body_html: str                  # HTML 正文原文
     raw_path: Path                  # .eml 落盘路径
-    is_ads: bool = False            # 分类结果（场景一；后续场景会扩展字段）
+    is_ads: bool = False            # 场景一：ADS 文献推送
+    is_grant: bool = False          # 场景二：基金/项目申报通知
 
 
 @dataclass

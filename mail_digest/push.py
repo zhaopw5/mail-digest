@@ -51,6 +51,17 @@ def send_html(cfg, to: str, subject: str, html_body: str) -> None:
         server.send_message(msg)
 
 
+def send_markdown(cfg, subject: str, md_text: str) -> None:
+    """把一段 Markdown（如申报机会清单）作为完整 HTML 邮件发出。"""
+    doc = f"""<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>{html_mod.escape(subject)}</title><style>{bhd._CSS}</style></head>
+<body>{bhd.md_to_html(md_text, base=1)}<hr>
+<p style="color:#888">mail-digest 每日自动推送 · 关键信息（日期/金额）请以附件原文为准。</p>
+</body></html>"""
+    send_html(cfg, cfg.imap_user, subject, doc)
+
+
 def push(cfg, when: date | None = None) -> bool:
     """推送指定日期的中文简报；无内容返回 False（不发送）。"""
     when = when or date.today()

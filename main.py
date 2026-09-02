@@ -23,7 +23,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from mail_digest.ads import extract_bibcodes, parse_myads_sections
@@ -31,6 +31,7 @@ from mail_digest.ads_api import ADSAPIError, ADSClient, fill_from_doc
 from mail_digest.classify import classify
 from mail_digest.config import Config
 from mail_digest.digest import build_ads_digest, build_ads_digest_zh
+from mail_digest.fund import run_fund
 from mail_digest.imap_client import fetch_recent, load_mails_from_dir
 from mail_digest.llm import (
     LLMError,
@@ -250,6 +251,48 @@ def cmd_push(cfg: Config, args: argparse.Namespace) -> None:
         print(f"ℹ️  {label} 没有 ADS 推送邮件，未发送")
 
 
+def cmd_fund(cfg: Config, args: argparse.Namespace) -> None:
+    """场景二：识别基金/项目申报通知 → 附件解析 → LLM 提取 → 今日清单。"""
+    mails = load_mails_from_dir(cfg.eml_dir)
+    grant_mails = []
+    for m in mails:
+        classify(m)
+        if m.is_grant:
+            grant_mails.append(m)
+    print(f"扫描 {len(mails)} 封邮件，识别出 {len(grant_mails)} 封基金/项目申报通知")
+    force = getattr(args, "force", False)
+    limit = getattr(args, "limit", None)
+    n, digest_text = run_fund(cfg, grant_mails, force=force, limit=limit)
+    if n == 0:
+        print("没有待处理的新申报通知（已全部处理过；用 --force 强制重跑）")
+        return
+    print(f"共处理 {n} 封")
+    if digest_text:
+        out = cfg.digest_dir / f"fund_{date.today():%Y%m%d}.md"
+        out.write_text(digest_text, encoding="utf-8")
+        print(f"📄 今日申报清单已生成：{out}")
+    else:
+        print("（今天没有当天收到的通知，清单未生成；结果已缓存）")
+
+
+def cmd_push_fund(cfg: Config, args: argparse.Namespace) -> None:
+    """把指定日期（默认今天）的申报机会清单以 HTML 邮件发给自己。"""
+    when = date.today()
+    if getattr(args, "date", None):
+        try:
+            when = datetime.strptime(args.date, "%Y-%m-%d").date()
+        except ValueError:
+            sys.exit(f"日期格式错误：{args.date}（应为 YYYY-MM-DD）")
+    f = cfg.digest_dir / f"fund_{when:%Y%m%d}.md"
+    if not f.exists():
+        print(f"ℹ️  {when:%Y-%m-%d} 无申报清单文件（当日无通知或未先运行 fund）")
+        return
+    from mail_digest.push import send_markdown
+    send_markdown(cfg, f"项目申报机会清单 {when:%Y-%m-%d}",
+                  f.read_text(encoding="utf-8"))
+    print(f"✅ 已发送申报清单到 {cfg.imap_user}")
+
+
 # ---------------- CLI ----------------
 
 def main() -> None:
@@ -276,6 +319,13 @@ def main() -> None:
     p_push = sub.add_parser("push", help="把某天中文简报以 HTML 邮件发给自己（默认今天）")
     p_push.add_argument("--date", default=None, help="指定日期 YYYY-MM-DD（用于测试/补发）")
 
+    p_fund = sub.add_parser("fund", help="场景二：基金/申报通知 → 附件解析 → 今日申报机会清单")
+    p_fund.add_argument("--force", action="store_true", help="忽略幂等记录，重新处理")
+    p_fund.add_argument("--limit", type=int, default=None, help="本次最多处理 N 封")
+
+    p_push_fund = sub.add_parser("push-fund", help="把某天申报清单以 HTML 邮件发给自己（默认今天）")
+    p_push_fund.add_argument("--date", default=None, help="指定日期 YYYY-MM-DD")
+
     args = parser.parse_args()
     cfg = Config.load()
     if args.cmd == "fetch":
@@ -286,6 +336,10 @@ def main() -> None:
         cmd_html(cfg, args)
     elif args.cmd == "push":
         cmd_push(cfg, args)
+    elif args.cmd == "fund":
+        cmd_fund(cfg, args)
+    elif args.cmd == "push-fund":
+        cmd_push_fund(cfg, args)
     else:
         cmd_all(cfg, args)
 

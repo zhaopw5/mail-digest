@@ -1,2 +1,7 @@
-# 本项目零第三方运行时依赖（纯标准库：imaplib / email / urllib / json）。
-# 如需跑测试辅助工具（pytest 等）可自行安装。
+# 核心功能零第三方运行时依赖（邮件拉取/ADS API/DeepSeek 均为标准库 + urllib）。
+# 场景二「基金附件解析」需要以下文档解析库，安装：
+#   pip install -r requirements.txt
+pypdf
+python-docx
+openpyxl
+py7zr
