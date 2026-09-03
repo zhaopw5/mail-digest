@@ -1,0 +1,2 @@
+[console_scripts]
+mail-digest = mail_digest.cli:main

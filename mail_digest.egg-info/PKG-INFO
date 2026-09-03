@@ -1,3 +1,28 @@
+Metadata-Version: 2.4
+Name: mail-digest
+Version: 0.3.0
+Summary: 自动邮件整理底座：IMAP 拉信 + ADS 文献 Agent + 项目申报 Agent（附件安全解析/LLM 提取/邮件推送）
+Author: zhaopw5
+License: MIT
+Keywords: email,imap,ads,astro-physics,grants,llm,digest
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Classifier: Topic :: Communications :: Email
+Classifier: Topic :: Scientific/Engineering :: Astronomy
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Provides-Extra: ads
+Provides-Extra: grants
+Requires-Dist: pypdf; extra == "grants"
+Requires-Dist: python-docx; extra == "grants"
+Requires-Dist: openpyxl; extra == "grants"
+Requires-Dist: py7zr; extra == "grants"
+Provides-Extra: all
+Requires-Dist: pypdf; extra == "all"
+Requires-Dist: python-docx; extra == "all"
+Requires-Dist: openpyxl; extra == "all"
+Requires-Dist: py7zr; extra == "all"
+
 # 📧 邮件智能摘要 Agent（暂定名）
 
 > 每天自动读取腾讯企业邮箱，把「正文 + 链接里的内容 + 附件里的内容」聚合起来，按个人偏好过滤、判断重要度、生成摘要，推送给用户。
@@ -163,24 +188,6 @@
 **实施状态**：项目一（ADS 文献推送）M0 + M1 已完成骨架并通过本地测试（`main.py` + `mail_digest/`，零第三方依赖），等待凭据后跑真实数据。
 
 ## 11. 快速开始（开源使用）
-
-**安装方式 A：作为 Python 包安装（推荐给其他使用者）**
-
-```bash
-pip install "mail-digest[ads]"      # 只要 ADS 文献 Agent（零第三方依赖）
-pip install "mail-digest[grants]"   # 只要项目申报 Agent（含文档解析依赖）
-pip install "mail-digest[all]"      # 两个都要
-```
-安装后命令为 `mail-digest`（等价于 `python3 main.py`）。数据默认放在仓库/安装路径下的
-`data/`；安装使用时可指定独立数据目录：`export MAIL_DIGEST_DATA_DIR=~/mail-digest-data`。
-
-**安装方式 B：直接克隆本仓库运行**（开发/自用）
-
-```bash
-git clone https://github.com/zhaopw5/mail-digest
-pip install -r requirements.txt      # 仅基金附件解析需要（可选）
-python3 main.py --help
-```
 
 1. **配置**：`cp .env.example .env`，填写
    - `IMAP_USER` / `IMAP_AUTH_CODE`（邮箱地址 + 客户端授权码，见 .env.example 注释）

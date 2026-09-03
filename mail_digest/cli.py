@@ -46,8 +46,6 @@ from mail_digest.processors.ads.summarizer import build_article_messages, parse_
 from mail_digest.processors.grants.classifier import is_grant_email
 from mail_digest.processors.grants.processor import run_fund
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-
 
 # ---------------- 幂等 / 缓存 ----------------
 
@@ -259,15 +257,13 @@ def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
 # ---------------- 公共：html / all ----------------
 
 def cmd_html(cfg: Config, args: argparse.Namespace) -> None:
-    sys.path.insert(0, str(SCRIPTS_DIR))
-    import build_html_digest as bhd
-    files = bhd.collect_zh_files()
+    from mail_digest.core.html import merge_markdown_files
+    files = sorted(cfg.zh_digest_dir.glob("*.zh.md"))
     if not files:
-        sys.exit("未找到中文简报文件（data/digests/zh/ 或 backfill_old_mailbox/zh/）")
+        sys.exit("未找到中文简报文件（data/digests/zh/）")
     out = cfg.digest_dir / "ADS文献简报-中文总览.html"
-    out.write_text(bhd.build_merged(files), encoding="utf-8")
-    total = len(re.findall(r"^### ", "".join(f.read_text(encoding="utf-8") for f in files), re.M))
-    print(f"已生成合并 HTML（{len(files)} 份、{total} 条文献）: {out}")
+    out.write_text(merge_markdown_files(files), encoding="utf-8")
+    print(f"已生成合并 HTML（{len(files)} 份）: {out}")
 
 
 def cmd_all(cfg: Config, args: argparse.Namespace) -> None:

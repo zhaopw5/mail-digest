@@ -1,0 +1,14 @@
+
+[ads]
+
+[all]
+pypdf
+python-docx
+openpyxl
+py7zr
+
+[grants]
+pypdf
+python-docx
+openpyxl
+py7zr

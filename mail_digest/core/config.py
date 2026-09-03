@@ -121,8 +121,20 @@ class Config:
 
     @classmethod
     def load(cls, env_path: Path | None = None) -> "Config":
+        import os
         env = _load_dotenv(env_path or PROJECT_ROOT / ".env")
         cfg = cls()
+        # 数据目录：环境变量 MAIL_DIGEST_DATA_DIR 可覆盖（打包安装后无仓库 data 目录时必需）
+        override = os.environ.get("MAIL_DIGEST_DATA_DIR") or env.get("MAIL_DIGEST_DATA_DIR")
+        if override:
+            cfg.data_dir = Path(override).expanduser()
+            cfg.eml_dir = cfg.data_dir / "emails"
+            cfg.digest_dir = cfg.data_dir / "digests"
+            cfg.zh_digest_dir = cfg.data_dir / "digests" / "zh"
+            cfg.processed_file = cfg.data_dir / "processed.json"
+            cfg.llm_cache_file = cfg.data_dir / "llm_cache.json"
+            cfg.grants_processed_file = cfg.data_dir / "processed_fund.json"
+            cfg.grants_cache_file = cfg.data_dir / "fund_cache.json"
         cfg.imap_host = env.get("IMAP_HOST", cfg.imap_host)
         try:
             cfg.imap_port = int(env.get("IMAP_PORT", cfg.imap_port))

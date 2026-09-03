@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mail-digest"
+version = "0.3.0"
+description = "自动邮件整理底座：IMAP 拉信 + ADS 文献 Agent + 项目申报 Agent（附件安全解析/LLM 提取/邮件推送）"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "zhaopw5" }]
+keywords = ["email", "imap", "ads", "astro-physics", "grants", "llm", "digest"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Topic :: Communications :: Email",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+# 核心（core）零第三方依赖：imaplib/email/urllib 均为标准库
+dependencies = []
+
+[project.optional-dependencies]
+# ADS 文献 Agent：纯标准库，无额外依赖
+ads = []
+# 项目申报 Agent：附件文档解析所需
+grants = [
+    "pypdf",
+    "python-docx",
+    "openpyxl",
+    "py7zr",
+]
+all = [
+    "pypdf",
+    "python-docx",
+    "openpyxl",
+    "py7zr",
+]
+
+[project.scripts]
+mail-digest = "mail_digest.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mail_digest*"]
+exclude = ["tests*", "scripts*"]
