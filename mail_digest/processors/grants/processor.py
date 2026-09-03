@@ -17,10 +17,11 @@ from pathlib import Path
 from . import attachments as att
 from . import datecheck as dc
 from . import doctext as dt
-from .config import Config
-from .llm import LLMError, DeepSeekClient, build_grant_messages, parse_grant_result
-from .models import Mail
-from .research_profile import PROFILE
+from ...core.config import Config
+from ...core.llm import LLMError, DeepSeekClient
+from .extractor import build_grant_messages, parse_grant_result
+from ...core.models import Mail
+from ...core.research_profile import PROFILE
 
 DEFAULT_TEXT_CAP = 12000          # 每封送入 LLM 的合并文本上限（字符）
 
@@ -198,9 +199,9 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     安全：只处理可信发件人（cfg.grant_allowed_senders 白名单）的邮件附件，
     其余跳过——防止攻击者用伪造的「申报通知」投递恶意压缩包。
     """
-    from .config import sender_allowed
-    processed = _load_ids(cfg.data_dir / "processed_fund.json")
-    cache = _load_cache(cfg.data_dir / "fund_cache.json")
+    from ...core.config import sender_allowed
+    processed = _load_ids(cfg.grants_processed_file)
+    cache = _load_cache(cfg.grants_cache_file)
     todo = [m for m in grant_mails if force or m.uid not in processed]
     if not cfg.grant_allowed_senders.strip():
         print("⚠️  未配置 GRANT_ALLOWED_SENDERS（可信发件人白名单）——为防恶意附件，"
@@ -217,8 +218,8 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         return 0, None
 
     client = None
-    if cfg.deepseek_api_key:
-        client = DeepSeekClient(cfg.deepseek_api_key, cfg.deepseek_model,
+    if cfg.grants_llm_key():
+        client = DeepSeekClient(cfg.grants_llm_key(), cfg.deepseek_model,
                                 cfg.deepseek_base_url, cfg.llm_request_interval)
     results: list[dict] = []
     for m in todo:
@@ -236,8 +237,8 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
             print(f"     ✅ {pn}｜截止 {dl}")
         elif res.get("error"):
             print(f"     ⚠️ {res['error']}")
-    _save_cache(cfg.data_dir / "fund_cache.json", cache)
-    _save_ids(cfg.data_dir / "processed_fund.json", processed | {m.uid for m in todo})
+    _save_cache(cfg.grants_cache_file, cache)
+    _save_ids(cfg.grants_processed_file, processed | {m.uid for m in todo})
 
     # 汇总：只汇总「今天收到」的通知（按邮件日期）
     today = date.today()

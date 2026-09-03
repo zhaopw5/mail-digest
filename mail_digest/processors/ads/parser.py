@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from .models import Mail
+from ...core.models import Mail
 
 _BIBCODE_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789&.+"
@@ -91,3 +91,34 @@ def parse_myads_sections(body_text: str) -> list[tuple[str, list[str]]]:
                 bibs.append(cand)
         sections.append((name, bibs))
     return sections
+
+
+# ---------------- ADS 邮件识别（processor.matches）----------------
+_ADS_LINK_RE = re.compile(r"ui\.adsabs\.harvard\.edu/abs/")
+_ADS_DOMAIN_HINTS = ("adsabs.harvard.edu", "cfa.harvard.edu")
+_ADS_EXCLUDE_SUBJECT = ("verify", "welcome", "confirm your email")
+# 我们自己推送/测试的邮件（主题特征），正文虽含 ADS 链接但不能当推送再处理（防循环）
+_ADS_SELF_PUSH_HINTS = ("ads 文献简报", "[mail-digest]")
+_ADS_SUBJECT_HINTS = (
+    "astrophysics data system", "new article", "toc alert",
+    "table of contents", "citation alert", "notification criteria",
+    "new notifications",
+)
+
+
+def is_ads_email(mail: Mail) -> bool:
+    subject_lower = mail.subject.lower()
+    # 自推送邮件排除（防循环：正文含 ADS 链接的邮件可能是我们发出的简报）
+    if any(w in subject_lower for w in _ADS_SELF_PUSH_HINTS):
+        return False
+    blob = f"{mail.body_html}\n{mail.body_text}"
+    if _ADS_LINK_RE.search(blob):
+        return True
+    from_lower = mail.from_.lower()
+    if any(d in from_lower for d in _ADS_DOMAIN_HINTS):
+        if any(w in subject_lower for w in _ADS_EXCLUDE_SUBJECT):
+            return False
+        return True
+    return any(h in subject_lower for h in _ADS_SUBJECT_HINTS)
+
+

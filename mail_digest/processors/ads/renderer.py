@@ -8,9 +8,10 @@ M4 阶段再接入邮件/飞书推送。
 """
 from __future__ import annotations
 
-from .ads import subscription_label
-from .llm import GRADE_STARS
-from .models import ADSArticle, Mail
+from .parser import subscription_label
+from .summarizer import GRADE_STARS
+from ...core.models import Mail
+from .models import ADSArticle
 
 
 def _pretty_pubdate(pubdate: str) -> str:

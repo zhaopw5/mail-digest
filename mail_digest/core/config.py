@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def sender_allowed(from_header: str, allowed: str) -> bool:
@@ -71,11 +71,19 @@ class Config:
         "citation_count", "doi", "pubdate",
     ))
 
-    # ---- DeepSeek LLM（M3：中文翻译 + 一句话点评 + 分级）----
+    # ---- DeepSeek LLM（公共默认；各域可用独立 key 覆盖，见 ads_llm_key/grants_llm_key）----
     deepseek_api_key: str = ""
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com"
     llm_request_interval: float = 0.2   # 两次 LLM 请求最小间隔（秒）
+
+    # ---- 域开关（分 Agent：只要其中一个功能时另一个不跑）----
+    ads_enabled: bool = True            # ADS 文献 Agent（env ADS_ENABLED）
+    grants_enabled: bool = True         # 项目申报 Agent（env GRANTS_ENABLED）
+    # 各域独立 LLM key（缺省回退公共 DEEPSEEK_API_KEY）
+    # 只想给基金用云模型/或不想把附件发云端时，用独立 key 或留空控制
+    ads_llm_api_key: str = ""
+    grants_llm_api_key: str = ""
 
     # ---- SMTP（M4：每日邮件推送）----
     smtp_host: str = "smtp.exmail.qq.com"
@@ -90,13 +98,26 @@ class Config:
     eml_dir: Path = PROJECT_ROOT / "data" / "emails"
     digest_dir: Path = PROJECT_ROOT / "data" / "digests"
     zh_digest_dir: Path = PROJECT_ROOT / "data" / "digests" / "zh"
-    processed_file: Path = PROJECT_ROOT / "data" / "processed.json"
-    llm_cache_file: Path = PROJECT_ROOT / "data" / "llm_cache.json"
+    processed_file: Path = PROJECT_ROOT / "data" / "processed.json"        # ADS 处理状态
+    llm_cache_file: Path = PROJECT_ROOT / "data" / "llm_cache.json"        # ADS 翻译缓存
+    grants_processed_file: Path = PROJECT_ROOT / "data" / "processed_fund.json"  # 基金状态
+    grants_cache_file: Path = PROJECT_ROOT / "data" / "fund_cache.json"    # 基金提取缓存
 
     # ---- 行为 ----
     default_recent: int = 50            # fetch 默认拉最近 N 封
     default_folder: str = "INBOX"
     default_ads_limit: int = 20         # ads 一次最多处理的邮件数
+
+    # ---- 域级 LLM key 解析（前缀优先，回退公共 key）----
+    def ads_llm_key(self) -> str:
+        return self.ads_llm_api_key or self.deepseek_api_key
+
+    def grants_llm_key(self) -> str:
+        return self.grants_llm_api_key or self.deepseek_api_key
+
+    @property
+    def llm_model(self) -> str:
+        return self.deepseek_model
 
     @classmethod
     def load(cls, env_path: Path | None = None) -> "Config":
@@ -118,4 +139,8 @@ class Config:
         except ValueError:
             pass
         cfg.grant_allowed_senders = env.get("GRANT_ALLOWED_SENDERS", cfg.grant_allowed_senders)
+        cfg.ads_enabled = env.get("ADS_ENABLED", "true").strip().lower() != "false"
+        cfg.grants_enabled = env.get("GRANTS_ENABLED", "true").strip().lower() != "false"
+        cfg.ads_llm_api_key = env.get("ADS_LLM_API_KEY", cfg.ads_llm_api_key)
+        cfg.grants_llm_api_key = env.get("GRANTS_LLM_API_KEY", cfg.grants_llm_api_key)
         return cfg

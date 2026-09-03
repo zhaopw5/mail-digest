@@ -170,20 +170,39 @@
    - `DEEPSEEK_API_KEY`（可选，启用中文翻译/点评/分级，[DeepSeek 申请](https://platform.deepseek.com)）
 2. **个性化（可选）**：`cp research_profile.example.json data/research_profile.json` 并编辑，
    LLM 点评与相关性分级将贴合你的研究方向。
-3. **运行**（均在本项目目录下）：
+3. **运行**（两个 Agent 独立使用；公共底座命令见下）：
    ```bash
-   python3 main.py fetch --recent 50   # 拉取最近邮件到 data/emails
-   python3 main.py ads                 # ADS 推送 → 英文 + 中文简报（含点评/分级）
-   python3 main.py html                # 生成合并 HTML 总览
-   python3 main.py push                # 把当天简报用邮件发给自己
-   python3 main.py all                 # 一键：fetch + ads
+   python3 main.py fetch                 # 公共：拉取邮件到 data/emails
+   # ADS 文献 Agent
+   python3 main.py ads run               # 推送识别 → ADS API → 中文翻译/点评/分级简报
+   python3 main.py ads push              # 当天简报邮件发给自己
+   # 项目申报 Agent
+   python3 main.py grants run            # 申报通知 → 附件安全解析 → 申报机会清单
+   python3 main.py grants push           # 当天清单邮件发给自己
+   python3 main.py all                   # 一键：fetch + 已启用 Agent
+   python3 main.py html                  # 重新生成合并 HTML 总览
    ```
-4. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点：
+4. **域开关**：只要其中一个 Agent，就在 .env 里 `ADS_ENABLED=false` 或 `GRANTS_ENABLED=false`；
+   不想把基金附件发往云端模型时，只填 `ADS_LLM_API_KEY`（不填公共 `DEEPSEEK_API_KEY`）。
+5. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点：
    ```cron
-   0 9 * * * cd /path/to/this/project && python3 main.py all && python3 main.py html && python3 main.py push
+   0 9 * * * cd /path/to/this/project && python3 main.py all && python3 main.py html && python3 main.py ads push && python3 main.py grants push
    ```
-5. 产物：英文/中文简报在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
+6. 产物：英文/中文简报与清单在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
    本地测试：`python3 tests/test_local.py`（无网络）。
+
+### 项目结构（core + 两个处理器）
+
+```text
+mail_digest/
+├── core/                    # 公共底座：IMAP/配置/模型/LLM 客户端/SMTP 推送/画像
+├── processors/
+│   ├── ads/                 # ADS 文献 Agent（parser/api/summarizer/renderer/models）
+│   └── grants/              # 项目申报 Agent（classifier/attachments/doctext/datecheck/extractor/processor）
+└── cli.py                   # 命令入口（ads run/push、grants run/push、fetch/all/html）
+```
+只使用 ADS 的用户不会加载 grants 的文档解析依赖（pypdf/python-docx/openpyxl/py7zr 在
+`requirements.txt` 中标注为场景二所需，按需安装）。
 
 ## 12. 可选系统依赖（提升基金附件解析覆盖）
 

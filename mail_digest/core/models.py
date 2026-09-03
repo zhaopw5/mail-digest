@@ -1,7 +1,7 @@
-"""数据模型。"""
+"""公共数据模型（core）：Mail 为跨处理器共享；ADSArticle 见 processors/ads/models.py。"""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -18,19 +18,5 @@ class Mail:
     body_text: str                  # 纯文本正文（已解码）
     body_html: str                  # HTML 正文原文
     raw_path: Path                  # .eml 落盘路径
-    is_ads: bool = False            # 场景一：ADS 文献推送
+    is_ads: bool = False            # 场景一：ADS 文献推送（处理器匹配结果缓存）
     is_grant: bool = False          # 场景二：基金/项目申报通知
-
-
-@dataclass
-class ADSArticle:
-    """一条 ADS 文献。"""
-    bibcode: str
-    title: str = ""
-    abstract: str = ""
-    authors: list[str] = field(default_factory=list)
-    citation_count: int | None = None
-    doi: str = ""
-    pubdate: str = ""
-    source: str = "email"           # email | api
-    error: str = ""                 # 非空表示该文献信息获取失败的原因

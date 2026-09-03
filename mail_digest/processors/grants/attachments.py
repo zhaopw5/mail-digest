@@ -21,7 +21,7 @@ import zipfile
 from email.header import decode_header, make_header
 from pathlib import Path
 
-from .models import Mail
+from ...core.models import Mail
 
 # 默认限制
 MAX_ATTACH_SIZE = 30 * 1024 * 1024      # 单附件 30 MB

@@ -15,7 +15,7 @@ from email.mime.text import MIMEText
 from pathlib import Path
 
 # 复用 build_html_digest 的 md → HTML 转换
-_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+_SCRIPTS = Path(__file__).resolve().parent.parent.parent / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 import build_html_digest as bhd  # noqa: E402
