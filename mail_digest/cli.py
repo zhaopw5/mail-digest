@@ -31,7 +31,8 @@ from mail_digest.core.config import Config
 from mail_digest.core.imap_client import fetch_recent, load_mails_from_dir
 from mail_digest.core.llm import LLMError, DeepSeekClient
 from mail_digest.core.models import Mail
-from mail_digest.core.push import push, send_markdown
+from mail_digest.core.push import send_markdown
+from mail_digest.processors.ads.delivery import push
 from mail_digest.core.research_profile import PROFILE_SUMMARY
 
 from mail_digest.processors.ads.api import ADSAPIError, ADSClient, fill_from_doc
@@ -221,6 +222,11 @@ def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
     if not cfg.grants_enabled:
         print("⏸️  Grant Agent 已关闭（.env 中 GRANTS_ENABLED=false）。如需启用改为 true。")
         return
+    try:
+        import pypdf  # noqa: F401
+    except ImportError:
+        print("ℹ️  未安装文档解析依赖（pypdf/python-docx/openpyxl/py7zr），附件只能解析 txt/csv；")
+        print("    可执行  pip install -e \".[grants]\"  以完整解析 docx/pdf/xlsx/压缩包。")
     if not cfg.grant_allowed_senders.strip():
         print("⚠️  未配置 GRANT_ALLOWED_SENDERS（可信发件人白名单）——为防恶意附件，跳过全部基金邮件附件处理。")
         print("    请在 .env 配置，如：GRANT_ALLOWED_SENDERS=*@mail.sysu.edu.cn")
@@ -257,7 +263,7 @@ def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
 # ---------------- 公共：html / all ----------------
 
 def cmd_html(cfg: Config, args: argparse.Namespace) -> None:
-    from mail_digest.core.html import merge_markdown_files
+    from mail_digest.processors.ads.overview import merge_markdown_files
     files = sorted(cfg.zh_digest_dir.glob("*.zh.md"))
     if not files:
         sys.exit("未找到中文简报文件（data/digests/zh/）")
@@ -289,6 +295,9 @@ def _parse_date_arg(args: argparse.Namespace) -> date | None:
 # ---------------- CLI ----------------
 
 def main() -> None:
+    import os as _os
+    if hasattr(_os, "umask"):          # Unix：收紧默认权限，防同机其他用户读邮件数据
+        _os.umask(0o077)
     parser = argparse.ArgumentParser(
         prog="mail-digest",
         description="自动邮件整理底座（core）+ ADS 文献 / 项目申报 两个独立 Agent",

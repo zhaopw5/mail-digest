@@ -16,7 +16,8 @@ _REPO = Path(__file__).resolve().parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from mail_digest.core import html as h  # noqa: E402
+from mail_digest.core import html as h
+from mail_digest.processors.ads import overview as ov  # noqa: E402
 
 
 def main() -> None:
@@ -32,7 +33,7 @@ def main() -> None:
     if not files:
         sys.exit(f"未找到中文简报文件: {zh_dir}")
     out = _REPO / "data" / "digests" / "ADS文献简报-中文总览.html"
-    out.write_text(h.merge_markdown_files(files), encoding="utf-8")
+    out.write_text(ov.merge_markdown_files(files), encoding="utf-8")
     print(f"已生成合并 HTML（{len(files)} 份）: {out}")
 
 

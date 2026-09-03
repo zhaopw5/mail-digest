@@ -57,6 +57,9 @@ def _parse_message(uid: int, folder: str, msg: email.message.Message) -> Mail:
         date = parsedate_to_datetime(msg.get("Date", "")).astimezone()
     except Exception:
         date = None
+    headers: dict[str, str] = {}
+    for key, val in msg.items():
+        headers.setdefault(key.lower(), val)   # 小写键、取首个值（含 Authentication-Results）
     return Mail(
         uid=uid,
         folder=folder,
@@ -67,6 +70,7 @@ def _parse_message(uid: int, folder: str, msg: email.message.Message) -> Mail:
         body_text=text,
         body_html=html,
         raw_path=Path(""),
+        headers=headers,
     )
 
 
@@ -94,7 +98,17 @@ def fetch_recent(cfg, recent: int, folder: str = "INBOX",
         if typ != "OK":
             raise RuntimeError(f"无法打开文件夹 {folder!r}: {typ}")
 
-        typ, data = conn.search(None, "ALL")
+        # 用 UID 系列命令（非序号）：UID 在文件夹内稳定，删信不影响，幂等可靠。
+        # select 响应里取 UIDVALIDITY，供幂等键/诊断使用。
+        validity = None
+        try:
+            vresp = conn.untagged_resp.get("UIDVALIDITY")
+            if vresp:
+                validity = int(vresp[0])
+        except (TypeError, ValueError):
+            validity = None
+
+        typ, data = conn.uid("search", None, "ALL")
         if typ != "OK" or not data or not data[0]:
             return mails
 
@@ -102,7 +116,7 @@ def fetch_recent(cfg, recent: int, folder: str = "INBOX",
         recent_uids = all_uids[-recent:] if recent else all_uids
         for uid_b in recent_uids:
             uid = int(uid_b)
-            typ, msg_data = conn.fetch(str(uid), "(RFC822)")
+            typ, msg_data = conn.uid("fetch", str(uid), "(RFC822)")
             if typ != "OK" or not msg_data or msg_data[0] is None:
                 continue
             raw = msg_data[0][1]
@@ -112,6 +126,25 @@ def fetch_recent(cfg, recent: int, folder: str = "INBOX",
             raw_path.write_bytes(raw)
             mail.raw_path = raw_path
             mails.append(mail)
+        if validity is not None:
+            try:
+                vf = cfg.data_dir / "imap_uidvalidity.json"
+                vf.parent.mkdir(parents=True, exist_ok=True)
+                import json as _json
+                rec = {}
+                if vf.exists():
+                    try:
+                        rec = _json.loads(vf.read_text(encoding="utf-8"))
+                    except Exception:
+                        rec = {}
+                prev = rec.get(folder)
+                if prev is not None and prev != validity:
+                    print(f"⚠️  文件夹 {folder!r} 的 UIDVALIDITY 变化（{prev} → {validity}），"
+                          "历史处理记录可能失效，建议核对")
+                rec[folder] = validity
+                vf.write_text(_json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass  # 记录失败不影响拉信
     finally:
         conn.logout()
     return mails

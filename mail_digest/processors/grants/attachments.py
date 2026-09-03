@@ -276,13 +276,20 @@ def _extract_one(path: Path, dest: Path) -> list[Path]:
     return extracted
 
 
-def unpack_recursive(paths: list[Path], work: Path, depth: int = 0) -> tuple[list[Path], list[dict]]:
+def unpack_recursive(paths: list[Path], work: Path, depth: int = 0,
+                     budget: dict | None = None) -> tuple[list[Path], list[dict]]:
     """递归展开归档：返回 (可读文件列表, 问题报告)。
 
     work 为本次工作目录；嵌套归档在子目录展开。
+
+    安全：budget 贯穿「整封邮件、所有递归层级」累计解压字节数与文件数，
+    任一归档解出后全局超限即抛 AttachmentError（防多层嵌套绕过单归档上限）。
+    单归档另有 _extract_one 的事前预算与 _verify_output 复核。
     """
     if depth > MAX_DEPTH:
         return [], [{"error": f"嵌套解压超过 {MAX_DEPTH} 层，深层内容需人工查看"}]
+    if budget is None:
+        budget = {"bytes": 0, "files": 0}
     readable: list[Path] = []
     problems: list[dict] = []
     for p in paths:
@@ -291,15 +298,26 @@ def unpack_recursive(paths: list[Path], work: Path, depth: int = 0) -> tuple[lis
             sub.mkdir(parents=True, exist_ok=True)
             try:
                 files = _extract_one(p, sub)
-                # 归档里可能还有归档 → 递归
-                r, pr = unpack_recursive(files, work / f"sub_{depth}", depth + 1)
-                readable.extend(r)
-                problems.extend(pr)
             except (AttachmentError, zipfile.BadZipFile, tarfile.TarError) as exc:
                 problems.append({"file": p.name, "error": str(exc)})
                 # 部分失败（如 rar 内个别文件名超长）时，已解出的文件仍保留可用
                 partial = [q for q in sub.rglob("*") if q.is_file()]
                 readable.extend(partial)
+                continue
+            # 全局预算：跨所有层累计，超限中止整封（不再保留 partial）
+            for q in files:
+                try:
+                    budget["bytes"] += q.stat().st_size
+                except OSError:
+                    pass
+                budget["files"] += 1
+                if budget["bytes"] > MAX_EXTRACT_TOTAL or budget["files"] > MAX_FILES:
+                    raise AttachmentError(
+                        "整封邮件解压总量/文件数超过全局上限，已中止（疑似压缩炸弹，多嵌套绕过单包上限）")
+            # 归档里可能还有归档 → 递归（共享 budget）
+            r, pr = unpack_recursive(files, work / f"sub_{depth}", depth + 1, budget)
+            readable.extend(r)
+            problems.extend(pr)
         else:
             readable.append(p)
     return readable, problems

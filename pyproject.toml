@@ -39,6 +39,8 @@ all = [
 
 [project.scripts]
 mail-digest = "mail_digest.cli:main"
+ads-digest = "mail_digest.ads_cli:main"
+grants-digest = "mail_digest.grants_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["mail_digest*"]

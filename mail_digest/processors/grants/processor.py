@@ -26,6 +26,41 @@ from ...core.research_profile import PROFILE
 DEFAULT_TEXT_CAP = 12000          # 每封送入 LLM 的合并文本上限（字符）
 
 
+_AUTH_FAIL_RE = re.compile(r"(?:spf|dkim|dmarc)\s*=\s*(fail|hardfail|softfail)(?=\s|;|$)", re.I)
+
+
+def validate_evidence(llm: dict, text: str, attach_names: list) -> list[str]:
+    """校验 LLM 返回的原文证据是否真实存在于输入文本与附件清单中。
+
+    防提示词注入/幻觉：deadline/amount/limit 的 quote 必须是原文精确子串，
+    source 必须对应真实附件名或『邮件正文』；否则给出警告（证据不可信）。
+    """
+    warns: list[str] = []
+    for field, qk, sk in (("截止", "deadline_quote", "deadline_source"),
+                          ("资助", "amount_quote", "amount_source"),
+                          ("限项", "limit_quote", "limit_source")):
+        q = str(llm.get(qk) or "").strip()
+        if not q or q == "未提及":
+            continue
+        if text.find(q) == -1:
+            warns.append(f"{field}证据原句未能在附件/正文原文中找到"
+                         f"（“{q[:40]}…”）——疑似注入/幻觉，请人工核对")
+        src = str(llm.get(sk) or "").strip()
+        if src and src != "邮件正文" and not any(src in n for n in attach_names):
+            warns.append(f"{field}证据来源“{src}”不在附件清单中")
+    return warns
+
+
+def auth_results_fail(mail) -> bool:
+    """解析邮件服务器写入的 Authentication-Results：SPF/DKIM/DMARC 判定失败 → 不可信。
+
+    From 头可伪造；若邮箱服务器（MX 层）已判定认证失败，即使 From 域在白名单内也拒绝。
+    无 Authentication-Results 头（如校内互发）不拦截，仅依赖白名单。
+    """
+    res = (mail.headers or {}).get("authentication-results", "") or ""
+    return bool(_AUTH_FAIL_RE.search(res))
+
+
 def _load_ids(path: Path) -> set[int]:
     if not path.exists():
         return set()
@@ -85,9 +120,11 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
             text = f"{body_head}\n\n【附件文本】\n{text}" if text.strip() else body_head
         if not text.strip():
             result["problems"].append("正文与附件均无可用文本")
-    except Exception as exc:  # 兜底：单封失败不影响其他
+    except Exception as exc:  # 兜底：单封失败不影响其他；清理疑似炸弹残留
         result["error"] = f"附件处理失败: {exc}"
         text = mail.body_text.strip()[: text_cap]
+        if work.exists():
+            shutil.rmtree(work, ignore_errors=True)
 
     if client:
         try:
@@ -100,14 +137,22 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
     else:
         result["error"] = "未配置 DEEPSEEK_API_KEY，仅列出邮件标题"
 
-    # 防提示词注入/防幻觉：规则独立提取日期，与 LLM 结果交叉校验
+    # 防提示词注入/防幻觉：① 证据 quote/source 校验 ② 规则独立提取日期交叉校验
     if result.get("llm") and not result.get("error"):
         ref_year = mail.date.year if mail.date else date.today().year
+        attach_names: list[str] = []
         try:
+            attach_names = [p.name for p in readable]
+        except Exception:                       # 附件处理失败路径，readable 未定义
+            attach_names = []
+        try:
+            result["evidence_warns"] = validate_evidence(
+                result["llm"], text, attach_names)
             rule = dc.rule_dates(text, ref_year)
             result["deadline_check"] = dc.cross_check(
                 str(result["llm"].get("deadline_date") or ""), rule, ref_year)
         except Exception:
+            result["evidence_warns"] = []
             result["deadline_check"] = ""
     return result
 
@@ -162,6 +207,8 @@ def build_daily_list(results: list[dict], when: date) -> str:
         ev("📜 截止证据", "deadline_quote", "deadline_source")
         if res.get("deadline_check"):
             out.append(f"- {res['deadline_check']}")
+        for w in res.get("evidence_warns") or []:
+            out.append(f"- ⚠️ {w}")
         ev("📜 资助证据", "amount_quote", "amount_source")
         ev("📜 限项证据", "limit_quote", "limit_source")
         if llm.get("match_level") and llm.get("match_reason"):
@@ -207,10 +254,12 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         print("⚠️  未配置 GRANT_ALLOWED_SENDERS（可信发件人白名单）——为防恶意附件，"
               "跳过全部基金邮件附件处理。请在 .env 配置，如：GRANT_ALLOWED_SENDERS=*@mail.sysu.edu.cn")
         return 0, None
-    trusted = [m for m in todo if sender_allowed(m.from_, cfg.grant_allowed_senders)]
+    trusted = [m for m in todo
+               if sender_allowed(m.from_, cfg.grant_allowed_senders)
+               and not auth_results_fail(m)]
     skipped = len(todo) - len(trusted)
     if skipped:
-        print(f"⏭️  跳过 {skipped} 封非可信发件人的邮件（不做附件处理，防恶意压缩包）")
+        print(f"⏭️  跳过 {skipped} 封未通过信任检查的邮件（发件人白名单/认证结果 fail，不做附件处理）")
     todo = trusted
     if limit and len(todo) > limit:
         todo = todo[:limit]

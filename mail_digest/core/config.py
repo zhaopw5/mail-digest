@@ -123,6 +123,10 @@ class Config:
     def load(cls, env_path: Path | None = None) -> "Config":
         import os
         env = _load_dotenv(env_path or PROJECT_ROOT / ".env")
+        # 优先级：系统环境变量 > .env 文件（便于安装/容器/CI 场景注入配置）
+        _env_keys = [k for k in os.environ
+                     if k.startswith(("IMAP_", "SMTP_", "ADS_", "GRANTS_", "GRANT_", "DEEPSEEK_", "MAIL_DIGEST_"))]
+        env = {**env, **{k: os.environ[k] for k in _env_keys}}
         cfg = cls()
         # 数据目录：环境变量 MAIL_DIGEST_DATA_DIR 可覆盖（打包安装后无仓库 data 目录时必需）
         override = os.environ.get("MAIL_DIGEST_DATA_DIR") or env.get("MAIL_DIGEST_DATA_DIR")

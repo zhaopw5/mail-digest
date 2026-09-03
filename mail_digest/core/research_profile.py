@@ -12,9 +12,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-_PROFILE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "research_profile.json"
+_override_dir = os.environ.get("MAIL_DIGEST_DATA_DIR")
+if _override_dir:
+    _PROFILE_FILE = Path(_override_dir).expanduser() / "research_profile.json"
+else:
+    _PROFILE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / "research_profile.json"
 
 # 通用占位画像（不含任何真实个人信息；只用于演示与保证功能可用）
 DEFAULT_PROFILE: dict = {
