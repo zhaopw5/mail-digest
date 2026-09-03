@@ -164,23 +164,28 @@
 
 ## 11. 快速开始（开源使用）
 
-**安装方式 A：作为 Python 包安装（推荐给其他使用者）**
+> 状态说明：本项目**尚未发布到 PyPI**，`pip install mail-digest` 目前对其他人不可用。
+> 要用它，先获取源码（下方方式 A），在源码目录内安装或直接运行。
 
-```bash
-pip install "mail-digest[ads]"      # 只要 ADS 文献 Agent（零第三方依赖）
-pip install "mail-digest[grants]"   # 只要项目申报 Agent（含文档解析依赖）
-pip install "mail-digest[all]"      # 两个都要
-```
-安装后命令为 `mail-digest`（等价于 `python3 main.py`）。数据默认放在仓库/安装路径下的
-`data/`；安装使用时可指定独立数据目录：`export MAIL_DIGEST_DATA_DIR=~/mail-digest-data`。
-
-**安装方式 B：直接克隆本仓库运行**（开发/自用）
+**安装方式 A：克隆本仓库（推荐）**
 
 ```bash
 git clone https://github.com/zhaopw5/mail-digest
-pip install -r requirements.txt      # 仅基金附件解析需要（可选）
+cd mail-digest
+
+# 方式 A1：直接运行（无需安装，零依赖即可跑 ADS 场景）
 python3 main.py --help
+
+# 方式 A2：装成命令 mail-digest（可选依赖按需选）
+pip install -e ".[ads]"       # 只要 ADS 文献 Agent（零第三方依赖）
+pip install -e ".[grants]"    # 只要项目申报 Agent（含文档解析依赖）
+pip install -e ".[all]"       # 两个都要
 ```
+安装后命令为 `mail-digest`（等价于 `python3 main.py`）。
+数据默认在仓库内 `data/`；如需独立数据目录（如安装/服务器部署）：
+`export MAIL_DIGEST_DATA_DIR=~/mail-digest-data`。
+
+> 待发布到 PyPI 后，`pip install "mail-digest[ads]"` 才可全局安装。
 
 1. **配置**：`cp .env.example .env`，填写
    - `IMAP_USER` / `IMAP_AUTH_CODE`（邮箱地址 + 客户端授权码，见 .env.example 注释）
