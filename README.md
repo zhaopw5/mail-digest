@@ -253,3 +253,95 @@ sudo apt-get install -y p7zip-full unrar libreoffice-writer libreoffice-calc
 2. 证据返回：截止/金额/限项必须同时输出**原文原句**（deadline_quote 等）与来源文件名，清单中直接展示证据行
 3. 规则交叉校验：`mail_digest/datecheck.py` 用正则独立提取文本日期，与模型 `deadline_date` 交叉比对，不一致/超范围/格式非法时输出警告（可对抗被注入篡改的日期）
 4. 展示证据而非仅结论：清单每条附「📜 证据〔来源〕“原文”」，供人工核对
+
+## 14. 验证与自查指南
+
+### 14.1 一分钟冒烟测试
+
+```bash
+python3 tests/test_local.py
+# 期望输出：✅ 全部本地测试通过（含安全回归）
+# 覆盖：bibcode 提取 / myADS 分组 / 简报生成 / 基金识别 /
+#       安全回归（zip 穿越、tar symlink、zip 炸弹、白名单、日期交叉校验、注入边界）
+```
+
+### 14.2 每天到底跑没跑、报错没有
+
+```bash
+tail -n 40 data/cron.log          # 定时任务日志（9:00 自动运行）
+```
+
+### 14.3 某封基金邮件为什么没出现在清单里
+
+每封邮件的处理结果缓存在 `data/fund_cache.json`（键为邮件 uid）。没进清单通常有三种原因：
+
+| 现象 | 原因 | 在哪看 |
+|---|---|---|
+| 日志有「跳过 N 封非可信发件人的邮件」 | 发件人不在 `GRANT_ALLOWED_SENDERS` 白名单（安全拦截，正常） | cron.log |
+| 清单里该条带 ⚠️ | 附件读不了（rar 未装工具/老 .doc/图片/损坏文件） | 清单 md 里 ⚠️ 行 |
+| 当天清单为空 | 当天收到的通知都处理了，但「邮件日期」不是当天 → 只缓存不入当日清单 | 结果见 fund_cache.json |
+
+### 14.4 验证「附件真的解压了」
+
+1）看处理现场（每封处理的解压产物保留在 work 目录，uid 为邮件编号）：
+
+```bash
+ls data/work/fund_000009/unpack_*/       # 把 000009 换成目标邮件 uid
+find data/work/fund_000009 -type f | head
+```
+
+2）手动重解一封，与清单对照（把 uid=9 换成任意 uid）：
+
+```bash
+python3 -c "
+from mail_digest.core.config import Config
+from mail_digest.core.imap_client import load_mails_from_dir
+from mail_digest.processors.grants import attachments as att
+import shutil
+from pathlib import Path
+cfg = Config.load()
+m = next(x for x in load_mails_from_dir(cfg.eml_dir) if x.uid == 9)
+shutil.rmtree('data/work/check', ignore_errors=True)
+fs = att.extract_attachments(m, Path('data/work/check'))
+ok = [f['path'] for f in fs if f['ok'] and f['path']]
+r, p = att.unpack_recursive(ok, Path('data/work/check/u'))
+print(len(r), '个可读文件，', len(p), '个问题')
+"
+```
+
+3）原始附件对照：`data/emails/*.eml` 是完整原始邮件，用邮件客户端或解压软件打开即可看到服务器上收到的附件原文。
+
+### 14.5 安全边界自查
+
+**发件人白名单是否生效**（改 .env 后验证）：
+
+```bash
+python3 -c "
+from mail_digest.core.config import Config, sender_allowed
+cfg = Config.load()
+print('白名单:', cfg.grant_allowed_senders)
+print('可信发件人放行:', sender_allowed('孙姗珍 <a@mail.sysu.edu.cn>', cfg.grant_allowed_senders))
+print('外部发件人被拦:', not sender_allowed('攻击者 <x@evil.org>', cfg.grant_allowed_senders))
+"
+```
+
+**恶意压缩包被拒**：用 14.4 的命令手动构造一个含符号链接或 `../` 条目的
+zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tests 中
+`test_zip_path_traversal_blocked` / `test_tar_symlink_blocked` / `test_zip_bomb_blocked`
+就是自动化版本）。
+
+**提示词注入防线是否在**：清单中每条应含 `📜 证据〔来源〕“原文”` 行
+（关键字段逐字引用出处）；若模型日期与正则独立提取的日期不一致，会输出
+`⚠️ 截止日期校验失败/不一致` 警告。当心：这些警告出现时以原文证据为准，勿信模型结论。
+
+### 14.6 产物是什么（不再迷路）
+
+| 文件 | 内容 |
+|---|---|
+| `data/digests/zh/ads_*.zh.md` | 每日 ADS 中文简报（按订阅分组，星星分级） |
+| `data/digests/fund_YYYYMMDD.md` | 每日项目申报机会清单（含证据行） |
+| `data/digests/ADS文献简报-中文总览.html` | 全部 ADS 简报合并页（浏览器打开） |
+| `data/emails/*.eml` | 原始邮件（勿删，删了要重拉） |
+| `data/llm_cache.json` / `data/fund_cache.json` | LLM 缓存（防重复花钱，勿删） |
+| `data/processed.json` / `processed_fund.json` | 各 Agent 幂等状态（勿删） |
+| `data/work/` | 附件解压中间产物（可随时删除，不影响结果） |
