@@ -77,6 +77,7 @@ def auth_sender_trusted(mail, strict: bool = False,
     - 完全无 Authentication-Results（校内互发常见）→ 放行，仅依赖白名单
     """
     res = (mail.headers or {}).get("authentication-results", "") or ""
+    res = re.sub(r"\r?\n[ \t]+", " ", res)   # 防御性 unfold：折行续行并入本认证结果
     if allowed_servers and allowed_servers.strip():
         res = _filter_auth_servers(res, [s.strip().lower() for s in allowed_servers.split(",") if s.strip()])
     if not res.strip():

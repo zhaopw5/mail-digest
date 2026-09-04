@@ -33,6 +33,7 @@ def main() -> None:
 
     p_p = sub.add_parser("push", help="把当天申报清单邮件发给自己")
     p_p.add_argument("--date", default=None)
+    p_p.add_argument("--dry-run", action="store_true", help="只打印将发送内容，不连接 SMTP")
 
     args = parser.parse_args()
     cfg = Config.load()

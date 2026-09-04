@@ -61,6 +61,9 @@ def _parse_message(uid: int, folder: str, msg: email.message.Message) -> Mail:
     headers: dict[str, str] = {}
     for key, val in msg.items():
         k = key.lower()
+        if k == "authentication-results":
+            # RFC5322 折行 unfold：CRLF + 空格/Tab → 空格（防止续行被误当独立认证结果）
+            val = re.sub(r"\r?\n[ \t]+", " ", val)
         if k in headers:
             headers[k] += "\n" + val          # 同名头聚合（认证头可能多个，不能只信第一个）
         else:

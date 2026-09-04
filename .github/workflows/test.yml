@@ -53,5 +53,5 @@ jobs:
           PY
           python -m mail_digest.ads_cli run
           GRANT_ALLOWED_SENDERS='*@mail.sysu.edu.cn' python -m mail_digest.grants_cli run
-          python -m mail_digest.ads_cli push
-          python -m mail_digest.grants_cli push
+          python -m mail_digest.ads_cli push --dry-run
+          python -m mail_digest.grants_cli push --dry-run

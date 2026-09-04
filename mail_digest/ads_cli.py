@@ -33,6 +33,7 @@ def main() -> None:
 
     p_p = sub.add_parser("push", help="把当天 ADS 中文简报邮件发给自己")
     p_p.add_argument("--date", default=None)
+    p_p.add_argument("--dry-run", action="store_true", help="只打印将发送内容，不连接 SMTP")
 
     sub.add_parser("html", help="生成合并 HTML 总览")
 

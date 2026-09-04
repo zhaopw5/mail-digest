@@ -36,6 +36,7 @@ def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
         return
     print(f"共处理 {n} 封")
     if digest_text:
+        cfg.digest_dir.mkdir(parents=True, exist_ok=True)
         out = cfg.digest_dir / f"fund_{date.today():%Y%m%d}.md"
         out.write_text(digest_text, encoding="utf-8")
         print(f"📄 今日申报清单已生成：{out}")
@@ -47,6 +48,9 @@ def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
     f = cfg.digest_dir / f"fund_{when:%Y%m%d}.md"
     if not f.exists():
         print(f"ℹ️  {when:%Y-%m-%d} 无申报清单文件（当日无通知或未先运行 grants run）")
+        return
+    if getattr(args, "dry_run", False):
+        print(f"（dry-run）将发送 {when:%Y-%m-%d} 申报清单 → {cfg.imap_user}，不连接 SMTP")
         return
     send_markdown(cfg, f"项目申报机会清单 {when:%Y-%m-%d}",
                   f.read_text(encoding="utf-8"))

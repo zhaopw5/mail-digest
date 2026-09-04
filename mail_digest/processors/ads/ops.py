@@ -131,6 +131,11 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
 
 def cmd_ads_push(cfg: Config, args: argparse.Namespace) -> None:
     when = _parse_date_arg(getattr(args, "date", None))
+    if getattr(args, "dry_run", False):
+        label = (when or __import__("datetime").date.today()).strftime("%Y-%m-%d")
+        files = sorted(cfg.zh_digest_dir.glob(f"ads_{label.replace('-','')}_*.zh.md"))
+        print(f"（dry-run）将发送 {label} 的 ADS 简报（{len(files)} 份）→ {cfg.imap_user}，不连接 SMTP")
+        return
     if not cfg.smtp_host:
         sys.exit("未配置 SMTP_HOST（.env），无法推送")
     ok = push(cfg, when)

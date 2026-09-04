@@ -46,6 +46,7 @@ def main() -> None:
     a_run.add_argument("--limit", type=int, default=None)
     a_push = ads_sub.add_parser("push", help="把某天 ADS 中文简报邮件发给自己")
     a_push.add_argument("--date", default=None)
+    a_push.add_argument("--dry-run", action="store_true", help="只打印将发送内容，不连接 SMTP")
 
     p_grants = sub.add_parser("grants", help="项目申报 Agent")
     g_sub = p_grants.add_subparsers(dest="grants_cmd", required=True)
@@ -54,6 +55,7 @@ def main() -> None:
     g_run.add_argument("--limit", type=int, default=None)
     g_push = g_sub.add_parser("push", help="把某天申报清单邮件发给自己")
     g_push.add_argument("--date", default=None)
+    g_push.add_argument("--dry-run", action="store_true", help="只打印将发送内容，不连接 SMTP")
 
     p_all = sub.add_parser("all", help="一键：fetch + 各已启用 Agent 的 run")
     p_all.add_argument("--recent", type=int, default=None)

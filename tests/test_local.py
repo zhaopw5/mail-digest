@@ -502,20 +502,34 @@ def test_authserv_similar_domain_rejected() -> None:
     assert _server_trusted("mx1.mail.sysu.edu.cn", ["mail.sysu.edu.cn"])   # 合法子域
 
 
-def test_authserv_folded_header_ok() -> None:
-    """折行（continuation）的合法 Authentication-Results 头应被正确接受。"""
+def _parse_raw(raw: bytes) -> Mail:
+    """真实原始邮件字节 → _parse_message（覆盖邮件头折行解析）。"""
+    import email
+    return _parse_message(uid=1, folder="INBOX",
+                          msg=email.message_from_bytes(raw))
+
+
+def test_authserv_real_folded_header_ok() -> None:
+    """真实折行（CRLF+空白续行）的合法 Authentication-Results 头应被接受。"""
     from mail_digest.processors.grants.processor import auth_sender_trusted
 
-    def mk(h):
-        return Mail(uid=1, folder="INBOX", message_id="", subject="x",
-                    from_="a@trusted.edu.cn", date=None, body_text="",
-                    body_html="", raw_path=Path(""), headers=h)
+    raw = (b"From: a@trusted.edu.cn\r\nSubject: x\r\n"
+           b"Authentication-Results: mail.sysu.edu.cn;\r\n"
+           b" spf=pass smtp.mailfrom=trusted.edu.cn;\r\n"
+           b" dkim=pass header.d=trusted.edu.cn\r\n\r\nbody")
+    mail = _parse_raw(raw)
+    assert auth_sender_trusted(mail, strict=True, allowed_servers="mail.sysu.edu.cn")
 
-    # 头在传输中折行，解析后为两行同一结果
-    folded = ("mail.sysu.edu.cn; spf=pass smtp.mailfrom=trusted.edu.cn"
-              " mail.sysu.edu.cn; dkim=pass header.d=trusted.edu.cn")
-    assert auth_sender_trusted(mk({"authentication-results": folded}),
-                               strict=True, allowed_servers="mail.sysu.edu.cn")
+
+def test_authserv_folded_spoof_rejected() -> None:
+    """折行续行里塞可信域名（evil.example; \n mail.sysu.edu.cn; spf=pass）必须被拒绝。"""
+    from mail_digest.processors.grants.processor import auth_sender_trusted
+
+    raw = (b"From: a@trusted.edu.cn\r\nSubject: x\r\n"
+           b"Authentication-Results: evil.example;\r\n"
+           b" mail.sysu.edu.cn; spf=pass smtp.mailfrom=trusted.edu.cn\r\n\r\nbody")
+    mail = _parse_raw(raw)
+    assert not auth_sender_trusted(mail, strict=True, allowed_servers="mail.sysu.edu.cn")
 
 
 if __name__ == "__main__":
@@ -543,6 +557,7 @@ if __name__ == "__main__":
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()
-    test_authserv_folded_header_ok()
+    test_authserv_real_folded_header_ok()
+    test_authserv_folded_spoof_rejected()
     test_grant_prompt_untrusted_boundary()
     print("✅ 全部本地测试通过（含安全回归）")
