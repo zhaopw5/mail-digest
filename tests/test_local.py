@@ -331,6 +331,41 @@ def test_attachment_error_returns_not_crashes() -> None:
     assert "deadline_conflict" in res
 
 
+
+def test_failed_mail_not_marked_processed() -> None:
+    """可重试失败的邮件不写入 processed（下次自动重试），只有 ok/manual_review 才记录。"""
+    import os
+    import tempfile
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.grants import processor as gp
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.grant_allowed_senders = "*@mail.sysu.edu.cn"
+            ok_m = Mail(uid=1, folder="INBOX", message_id="", subject="关于组织申报XX项目通知",
+                        from_="a@mail.sysu.edu.cn", date=None, body_text="x",
+                        body_html="", raw_path=Path("x"))
+            bad_m = Mail(uid=2, folder="INBOX", message_id="", subject="关于组织申报YY项目通知",
+                         from_="b@mail.sysu.edu.cn", date=None, body_text="y",
+                         body_html="", raw_path=Path("x"))
+            def fake_process(cfg, m, client):
+                return {"uid": m.uid, "status": "ok" if m.uid == 1 else "retryable_error",
+                        "error": "" if m.uid == 1 else "boom", "subject": m.subject or "",
+                        "sender": m.from_ or "", "date": "", "problems": [], "llm": None}
+            saved_ids = {}
+            with mock.patch.object(gp, "process_mail", side_effect=fake_process), \
+                 mock.patch.object(gp, "_save_ids", side_effect=lambda p, ids: saved_ids.update(ids=ids)):
+                gp.run_fund(cfg, [ok_m, bad_m])
+            assert saved_ids.get("ids") == {1}, f"processed 只应含 ok 的 uid1，实际 {saved_ids}"
+            cache = gp._load_cache(cfg.grants_cache_file)
+            assert "2" not in cache, "retryable 失败不应写入持久缓存"
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -349,5 +384,6 @@ if __name__ == "__main__":
     test_self_push_header_excluded()
     test_deadline_multi_candidate_warning()
     test_attachment_error_returns_not_crashes()
+    test_failed_mail_not_marked_processed()
     test_grant_prompt_untrusted_boundary()
     print("✅ 全部本地测试通过（含安全回归）")

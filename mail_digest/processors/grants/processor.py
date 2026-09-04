@@ -132,6 +132,7 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
         "uid": mail.uid, "subject": mail.subject or "", "sender": mail.from_ or "",
         "date": mail.date.strftime("%Y-%m-%d %H:%M") if mail.date else "",
         "error": "", "problems": [], "llm": None,
+        "status": "ok",          # ok | manual_review | retryable_error
         "deadline_check": "", "deadline_conflict": False, "evidence_warns": [],
     }
     work = cfg.data_dir / "work" / f"fund_{mail.uid:06d}"
@@ -159,6 +160,8 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
             result["problems"].append("正文与附件均无可用文本")
     except Exception as exc:  # 兜底：单封失败不影响其他；清理疑似炸弹残留
         result["error"] = f"附件处理失败: {exc}"
+        result["status"] = ("manual_review" if isinstance(exc, att.AttachmentError)
+                            else "retryable_error")
         text = mail.body_text.strip()[: text_cap]
         if work.exists():
             shutil.rmtree(work, ignore_errors=True)
@@ -172,6 +175,7 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
         except LLMError as exc:
             err = f"LLM 提取失败: {exc}"
             result["error"] = f"{result['error']}；{err}" if result["error"] else err
+            result["status"] = "retryable_error"
     else:
         # 无 LLM key：降级为仅标题，不覆盖已发生的附件错误
         if not result["error"]:
@@ -192,10 +196,10 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
             result["deadline_check"] = dc.cross_check(
                 str(result["llm"].get("deadline_date") or ""), rule, ref_year)
             result["deadline_conflict"] = bool(result["deadline_check"])
-        except Exception:
-            result["evidence_warns"] = []
-            result["deadline_check"] = ""
-            result["deadline_conflict"] = False
+        except Exception as exc:
+            result["evidence_warns"] = [f"证据校验执行失败：{exc}"]
+            result["deadline_check"] = "⚠️ 截止日期校验执行失败，请人工核对"
+            result["deadline_conflict"] = True
     return result
 
 
@@ -321,7 +325,7 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     for m in todo:
         print(f"  ▶ [{m.uid}] 《{m.subject[:44]}》 附件处理中…")
         cached = cache.get(str(m.uid))
-        if cached and not force:
+        if cached and not force and cached.get("status") != "retryable_error":
             results.append(cached)
             continue
         try:
@@ -330,8 +334,10 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
             print(f"     ⚠️ [{m.uid}] 处理异常: {exc}（已跳过，不影响后续邮件）")
             res = {"uid": m.uid, "subject": m.subject or "", "sender": m.from_ or "",
                    "date": m.date.strftime("%Y-%m-%d %H:%M") if m.date else "",
-                   "error": f"处理异常: {exc}", "problems": [], "llm": None}
-        cache[str(m.uid)] = res
+                   "error": f"处理异常: {exc}", "problems": [], "llm": None,
+                   "status": "retryable_error"}
+        if res.get("status") != "retryable_error":
+            cache[str(m.uid)] = res       # 可重试失败不落缓存，避免误复用
         results.append(res)
         if res.get("llm"):
             pn = res["llm"].get("project_name") or res["subject"][:30]
@@ -340,7 +346,9 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         elif res.get("error"):
             print(f"     ⚠️ {res['error']}")
     _save_cache(cfg.grants_cache_file, cache)
-    _save_ids(cfg.grants_processed_file, processed | {m.uid for m in todo})
+    completed = {r["uid"] for r in results
+                 if r.get("status") in ("ok", "manual_review")}
+    _save_ids(cfg.grants_processed_file, processed | completed)
 
     # 汇总：只汇总「今天收到」的通知（按邮件日期）
     today = date.today()
