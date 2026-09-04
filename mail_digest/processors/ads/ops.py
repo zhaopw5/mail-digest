@@ -1,11 +1,13 @@
 """ADS Agent 操作（本域 CLI 与 mail-digest 共用；不依赖 grants 模块）。"""
 from __future__ import annotations
 
-import re
 
+import argparse
+import sys
+
+from ...core.imap_client import load_mails_from_dir
 from ...core.config import Config
 from ...core.llm import LLMError, DeepSeekClient
-from ...core.models import Mail
 from ...core.ops import (
     _load_json_obj, _load_processed, _save_json_obj, _save_processed,
     parse_date_arg as _parse_date_arg,
@@ -13,8 +15,8 @@ from ...core.ops import (
 from ...core.research_profile import PROFILE_SUMMARY
 from .api import ADSAPIError, ADSClient, fill_from_doc
 from .delivery import push
-from .models import ADSArticle
 from .overview import merge_markdown_files
+from .models import ADSArticle
 from .parser import extract_bibcodes, is_ads_email, parse_myads_sections
 from .renderer import build_ads_digest, build_ads_digest_zh
 from .summarizer import build_article_messages, parse_article_result
@@ -128,7 +130,7 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
     _save_processed(cfg.processed_file, processed | newly_processed)
 
 def cmd_ads_push(cfg: Config, args: argparse.Namespace) -> None:
-    when = _parse_date_arg(args)
+    when = _parse_date_arg(getattr(args, "date", None))
     if not cfg.smtp_host:
         sys.exit("未配置 SMTP_HOST（.env），无法推送")
     ok = push(cfg, when)
@@ -139,7 +141,6 @@ def cmd_ads_push(cfg: Config, args: argparse.Namespace) -> None:
         print(f"ℹ️  {label} 没有 ADS 推送邮件，未发送")
 
 def cmd_html(cfg: Config, args: argparse.Namespace) -> None:
-    from mail_digest.processors.ads.overview import merge_markdown_files
     files = sorted(cfg.zh_digest_dir.glob("*.zh.md"))
     if not files:
         print("ℹ️  当前无 ADS 中文简报（等新推送即可），跳过总览生成")

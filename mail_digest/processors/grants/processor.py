@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from . import attachments as att
@@ -38,7 +38,7 @@ def _from_domain(from_header: str) -> str:
     return addr.split("@")[-1] if "@" in addr else ""
 
 
-def auth_sender_trusted(mail) -> bool:
+def auth_sender_trusted(mail, strict: bool = False) -> bool:
     """发件人真实性（第二层）：Authentication-Results 判定。
 
     - 任一 SPF/DKIM/DMARC fail 族 → 不可信（拒绝）
@@ -48,15 +48,15 @@ def auth_sender_trusted(mail) -> bool:
     """
     res = (mail.headers or {}).get("authentication-results", "") or ""
     if not res.strip():
-        return True
+        return not strict               # 严格模式：缺失认证头一律拒绝
     if _AUTH_FAIL_RE.search(res):
         return False
     from_dom = _from_domain(mail.from_ or "")
     pass_domains = {m.group(1).strip("<>").lower().split("@")[-1]
                     for m in _AUTH_DOMAIN_RE.finditer(res)}
     if not pass_domains:
-        return True                       # 无 fail 也无 pass（neutral 等）→ 白名单兜底
-    return from_dom in pass_domains       # 需有 pass 域与 From 域一致（防错域 pass）
+        return not strict               # neutral 等：严格模式拒绝，宽松模式白名单兜底
+    return from_dom in pass_domains     # 需有 pass 域与 From 域一致（防错域 pass）
 
 
 
@@ -78,8 +78,11 @@ def validate_evidence(llm: dict, text: str, attach_names: list) -> list[str]:
             warns.append(f"{field}证据原句未能在附件/正文原文中找到"
                          f"（“{q[:40]}…”）——疑似注入/幻觉，请人工核对")
         src = str(llm.get(sk) or "").strip()
-        if src and src != "邮件正文" and not any(src in n for n in attach_names):
-            warns.append(f"{field}证据来源“{src}”不在附件清单中")
+        if src and src != "邮件正文":
+            matched = (src in attach_names) or any(
+                len(src) >= 12 and n.endswith(src) for n in attach_names)
+            if not matched:
+                warns.append(f"{field}证据来源“{src}”不在附件清单中")
     return warns
 
 
@@ -183,9 +186,11 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
             rule = dc.rule_dates(text, ref_year)
             result["deadline_check"] = dc.cross_check(
                 str(result["llm"].get("deadline_date") or ""), rule, ref_year)
+            result["deadline_conflict"] = bool(result["deadline_check"])
         except Exception:
             result["evidence_warns"] = []
             result["deadline_check"] = ""
+            result["deadline_conflict"] = False
     return result
 
 
@@ -200,6 +205,8 @@ _MATCH_RANK = {"高度匹配": 0, "部分匹配": 1, "待确认": 2, "不匹配"
 def _sort_key(res: dict) -> tuple:
     llm = res.get("llm") or {}
     d = str(llm.get("deadline_date") or "")
+    if res.get("deadline_conflict"):
+        d = ""                       # 冲突日期不参与排序靠前
     rank = _MATCH_RANK.get(str(llm.get("match_level") or ""), 4)
     return (rank, 0 if d else 1, d)
 
@@ -225,7 +232,10 @@ def build_daily_list(results: list[dict], when: date) -> str:
         dl = _pretty_deadline(res)
         mark = "⏰" if llm.get("deadline_date") else ""
         out.append(f"### {name} {mark}")
-        out.append(f"- 截止：{dl}")
+        if res.get("deadline_conflict"):
+            out.append(f"- ⚠️ 截止：{dl}（存在多个候选/校验未通过，**待人工核对**，勿按此日期安排）")
+        else:
+            out.append(f"- 截止：{dl}")
 
         def ev(tag: str, quote_key: str, src_key: str) -> None:
             """原文证据行：〔来源〕“原句”"""
@@ -288,7 +298,7 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         return 0, None
     trusted = [m for m in todo
                if sender_allowed(m.from_, cfg.grant_allowed_senders)
-               and auth_sender_trusted(m)]
+               and auth_sender_trusted(m, strict=cfg.grants_strict_auth)]
     skipped = len(todo) - len(trusted)
     if skipped:
         print(f"⏭️  跳过 {skipped} 封未通过信任检查的邮件（发件人白名单/认证结果 fail，不做附件处理）")

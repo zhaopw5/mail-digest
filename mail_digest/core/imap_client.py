@@ -60,7 +60,11 @@ def _parse_message(uid: int, folder: str, msg: email.message.Message) -> Mail:
         date = None
     headers: dict[str, str] = {}
     for key, val in msg.items():
-        headers.setdefault(key.lower(), val)   # 小写键、取首个值（含 Authentication-Results）
+        k = key.lower()
+        if k in headers:
+            headers[k] += "\n" + val          # 同名头聚合（认证头可能多个，不能只信第一个）
+        else:
+            headers[k] = val
     return Mail(
         uid=uid,
         folder=folder,

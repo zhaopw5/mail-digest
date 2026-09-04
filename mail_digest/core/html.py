@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import html as html_mod
 import re
-from pathlib import Path
 
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
 _URL_RE = re.compile(r"(https?://[^\s<>\"'）)\]】]+)")

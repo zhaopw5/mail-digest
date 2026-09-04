@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import email
-import os
 import re
 import shutil
 import subprocess

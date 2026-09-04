@@ -1,6 +1,7 @@
 """公共操作（core）：fetch 与 json/幂等工具，供 cli 与各域 cli 复用。"""
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path

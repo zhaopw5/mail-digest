@@ -1,11 +1,14 @@
 """Grants Agent 操作（本域 CLI 与 mail-digest 共用；不依赖 ads 模块）。"""
 from __future__ import annotations
 
-import sys
 from datetime import date
 
+import argparse
+
+from ...core.imap_client import load_mails_from_dir
 from ...core.config import Config
 from ...core.ops import parse_date_arg as _parse_date_arg
+from ...core.push import send_markdown
 from .classifier import is_grant_email
 from .processor import run_fund
 
@@ -40,7 +43,7 @@ def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
         print("（今天没有当天收到的通知，清单未生成；结果已缓存）")
 
 def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
-    when = _parse_date_arg(args) or date.today()
+    when = _parse_date_arg(getattr(args, "date", None)) or date.today()
     f = cfg.digest_dir / f"fund_{when:%Y%m%d}.md"
     if not f.exists():
         print(f"ℹ️  {when:%Y-%m-%d} 无申报清单文件（当日无通知或未先运行 grants run）")
