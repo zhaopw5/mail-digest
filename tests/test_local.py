@@ -312,6 +312,25 @@ def test_deadline_multi_candidate_warning() -> None:
     assert "多个截止相关日期候选" in warn
 
 
+
+def test_attachment_error_returns_not_crashes() -> None:
+    """附件处理抛异常时，process_mail 返回错误记录而非抛出（不拖垮整批）。"""
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.grants import attachments as attm
+    from mail_digest.processors.grants.processor import process_mail
+
+    cfg = Config.load()
+    m = Mail(uid=900099, folder="INBOX", message_id="", subject="关于组织申报XX项目通知",
+             from_="a@mail.sysu.edu.cn", date=None,
+             body_text="正式截止2026年9月30日。", body_html="", raw_path=Path("x"))
+    with mock.patch.object(attm, "extract_attachments",
+                           side_effect=RuntimeError("broken archive")):
+        res = process_mail(cfg, m, None)     # 不应抛异常
+    assert "broken archive" in res["error"]
+    assert "deadline_conflict" in res
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -329,5 +348,6 @@ if __name__ == "__main__":
     test_evidence_validation()
     test_self_push_header_excluded()
     test_deadline_multi_candidate_warning()
+    test_attachment_error_returns_not_crashes()
     test_grant_prompt_untrusted_boundary()
     print("✅ 全部本地测试通过（含安全回归）")

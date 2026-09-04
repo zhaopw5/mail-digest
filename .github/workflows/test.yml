@@ -22,10 +22,12 @@ jobs:
           python -m compileall -q mail_digest
       - name: Lint (ruff: bug 类检查，抓未定义名/未用导入)
         run: ruff check . --select F --exclude data
-      - name: Tests (含安全回归 + 真实 CLI 冒烟)
+      - name: Tests (含安全回归)
+        run: python tests/test_local.py
+      - name: CLI smoke (真实执行，无 || true)
         run: |
-          python tests/test_local.py
-          python -m mail_digest.ads_cli run >/dev/null || true
-          python -m mail_digest.grants_cli run >/dev/null || true
-          python -m mail_digest.ads_cli push >/dev/null || true
-          python -m mail_digest.grants_cli push >/dev/null || true
+          export MAIL_DIGEST_DATA_DIR="$(mktemp -d)"
+          python -m mail_digest.ads_cli run
+          GRANT_ALLOWED_SENDERS='*@example.edu' python -m mail_digest.grants_cli run
+          python -m mail_digest.ads_cli push
+          python -m mail_digest.grants_cli push

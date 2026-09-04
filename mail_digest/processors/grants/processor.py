@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -131,12 +132,13 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
         "uid": mail.uid, "subject": mail.subject or "", "sender": mail.from_ or "",
         "date": mail.date.strftime("%Y-%m-%d %H:%M") if mail.date else "",
         "error": "", "problems": [], "llm": None,
+        "deadline_check": "", "deadline_conflict": False, "evidence_warns": [],
     }
     work = cfg.data_dir / "work" / f"fund_{mail.uid:06d}"
     if work.exists():
-        import shutil
-        shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)   # 清理旧目录（模块级 shutil，避免局部未绑定）
     work.mkdir(parents=True, exist_ok=True)
+    readable: list = []
     try:
         files = att.extract_attachments(mail, work / "att")
         ok_files = [f["path"] for f in files if f["ok"] and f["path"]]
@@ -168,12 +170,15 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
             raw = client.complete_json(msgs)
             result["llm"] = parse_grant_result(raw)
         except LLMError as exc:
-            result["error"] = f"LLM 提取失败: {exc}"
+            err = f"LLM 提取失败: {exc}"
+            result["error"] = f"{result['error']}；{err}" if result["error"] else err
     else:
-        result["error"] = "未配置 DEEPSEEK_API_KEY，仅列出邮件标题"
+        # 无 LLM key：降级为仅标题，不覆盖已发生的附件错误
+        if not result["error"]:
+            result["problems"].append("未配置 DEEPSEEK_API_KEY，仅列出邮件标题（未做 LLM 提取）")
 
     # 防提示词注入/防幻觉：① 证据 quote/source 校验 ② 规则独立提取日期交叉校验
-    if result.get("llm") and not result.get("error"):
+    if result.get("llm"):   # 附件出错（error 非空）也须继续校验，防注入借异常绕过
         ref_year = mail.date.year if mail.date else date.today().year
         attach_names: list[str] = []
         try:
@@ -319,7 +324,13 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         if cached and not force:
             results.append(cached)
             continue
-        res = process_mail(cfg, m, client)
+        try:
+            res = process_mail(cfg, m, client)
+        except Exception as exc:          # 单封兜底：未知错误不得拖垮整批
+            print(f"     ⚠️ [{m.uid}] 处理异常: {exc}（已跳过，不影响后续邮件）")
+            res = {"uid": m.uid, "subject": m.subject or "", "sender": m.from_ or "",
+                   "date": m.date.strftime("%Y-%m-%d %H:%M") if m.date else "",
+                   "error": f"处理异常: {exc}", "problems": [], "llm": None}
         cache[str(m.uid)] = res
         results.append(res)
         if res.get("llm"):
