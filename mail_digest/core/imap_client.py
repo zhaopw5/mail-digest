@@ -99,13 +99,15 @@ def fetch_recent(cfg, recent: int, folder: str = "INBOX",
             raise RuntimeError(f"无法打开文件夹 {folder!r}: {typ}")
 
         # 用 UID 系列命令（非序号）：UID 在文件夹内稳定，删信不影响，幂等可靠。
-        # select 响应里取 UIDVALIDITY，供幂等键/诊断使用。
+        # 用标准 STATUS 命令取 UIDVALIDITY（imaplib 内部响应容器是私有属性，不可依赖）
         validity = None
         try:
-            vresp = conn.untagged_resp.get("UIDVALIDITY")
-            if vresp:
-                validity = int(vresp[0])
-        except (TypeError, ValueError):
+            typ_s, data_s = conn.status(folder, "(UIDVALIDITY)")
+            if typ_s == "OK" and data_s and data_s[0]:
+                m = re.search(rb"UIDVALIDITY\s+(\d+)", data_s[0])
+                if m:
+                    validity = int(m.group(1))
+        except Exception:
             validity = None
 
         typ, data = conn.uid("search", None, "ALL")
