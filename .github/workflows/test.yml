@@ -30,18 +30,25 @@ jobs:
           mkdir -p "$MAIL_DIGEST_DATA_DIR/emails"
           # ADS 样例邮件（离线模式：无 token 只提取 bibcode，不联网）
           cp tests/sample_ads.eml "$MAIL_DIGEST_DATA_DIR/emails/20260901_000001.eml"
-          # 基金样例邮件（白名单域 + 申报主题 + 附件）
+          # 基金样例邮件：真实 ZIP 附件 + 动态当天日期（覆盖附件提取/解压/解析链）
           python - <<'PY'
-          import base64
-          from pathlib import Path
+          import io, zipfile
+          from datetime import date
           from email.message import EmailMessage
+          from pathlib import Path
+          import os
+          buf = io.BytesIO()
+          with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+              zf.writestr("申报指南.txt", "项目受理截止2026年10月5日17:00，单项资助不超过200万元。")
           msg = EmailMessage()
           msg["From"] = "孙姗珍 <sshanzh@mail.sysu.edu.cn>"
           msg["To"] = "me@mail.sysu.edu.cn"
           msg["Subject"] = "关于组织申报2027年度XX专项项目的通知"
-          msg["Date"] = "Wed, 03 Sep 2026 09:00:00 +0800"
-          msg.set_content("请各单位于2026年10月5日前提交申报材料，单项资助不超过200万元。")
-          p = Path(__import__("os").environ["MAIL_DIGEST_DATA_DIR"]) / "emails" / "20260903_000002.eml"
+          msg["Date"] = date.today().strftime("%a, %d %b %Y 09:00:00 +0800")
+          msg.set_content("请各单位按时申报。")
+          msg.add_attachment(buf.getvalue(), maintype="application", subtype="zip",
+                              filename="申报指南.zip")
+          p = Path(os.environ["MAIL_DIGEST_DATA_DIR"]) / "emails" / f"{date.today():%Y%m%d}_000002.eml"
           p.write_bytes(msg.as_bytes())
           PY
           python -m mail_digest.ads_cli run

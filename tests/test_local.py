@@ -424,6 +424,100 @@ def test_ads_push_sends_via_smtp() -> None:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
 
+
+def test_legacy_failed_in_processed_gets_retried() -> None:
+    """旧失败 uid 同时在 processed 与缓存(error)：普通运行必须重新调用 process_mail。"""
+    import os
+    import tempfile
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.grants import processor as gp
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.grant_allowed_senders = "*@mail.sysu.edu.cn"
+            m = Mail(uid=7, folder="INBOX", message_id="", subject="关于组织申报XX项目通知",
+                     from_="a@mail.sysu.edu.cn", date=None, body_text="x",
+                     body_html="", raw_path=Path("x"))
+            # 旧版状态：processed 含 7，缓存含 error（旧失败）
+            gp._save_ids(cfg.grants_processed_file, {7})
+            gp._save_cache(cfg.grants_cache_file, {"7": {"error": "boom", "llm": None}})
+            calls = []
+            with mock.patch.object(gp, "process_mail",
+                                   side_effect=lambda cfg, m, c: calls.append(m.uid) or
+                                   {"uid": m.uid, "status": "ok", "subject": "", "sender": "",
+                                    "date": "", "problems": [], "llm": None, "error": ""}):
+                gp.run_fund(cfg, [m])
+            assert calls == [7], f"旧失败应重试，实际 calls={calls}"
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def test_force_failure_clears_old_success_cache() -> None:
+    """force 重跑仍失败(retryable)：旧成功缓存必须被删除，下次普通运行重新处理。"""
+    import os
+    import tempfile
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.grants import processor as gp
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.grant_allowed_senders = "*@mail.sysu.edu.cn"
+            m = Mail(uid=8, folder="INBOX", message_id="", subject="关于组织申报YY项目通知",
+                     from_="b@mail.sysu.edu.cn", date=None, body_text="x",
+                     body_html="", raw_path=Path("x"))
+            gp._save_cache(cfg.grants_cache_file, {"8": {"status": "ok", "llm": {"project_name": "旧成功"}}})
+            # force 运行：仍然失败（retryable）
+            def fail_proc(cfg, m, c):
+                return {"uid": m.uid, "status": "retryable_error", "error": "boom",
+                        "subject": "", "sender": "", "date": "", "problems": [], "llm": None}
+            with mock.patch.object(gp, "process_mail", side_effect=fail_proc):
+                gp.run_fund(cfg, [m], force=True)
+            cache = gp._load_cache(cfg.grants_cache_file)
+            assert "8" not in cache, "force 失败后旧成功缓存必须被删除"
+            assert 8 not in gp._load_ids(cfg.grants_processed_file)
+            # 下次普通运行：必须重新处理（calls 计数）
+            calls = []
+            with mock.patch.object(gp, "process_mail",
+                                   side_effect=lambda cfg, m, c: calls.append(m.uid) or
+                                   {"uid": m.uid, "status": "ok", "subject": "", "sender": "",
+                                    "date": "", "problems": [], "llm": None, "error": ""}):
+                gp.run_fund(cfg, [m])
+            assert calls == [8], f"下次应重新处理，实际 calls={calls}"
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def test_authserv_similar_domain_rejected() -> None:
+    """相似域名（mail.sysu.edu.cn.attacker.example）不得绕过 authserv 白名单。"""
+    from mail_digest.processors.grants.processor import _server_trusted
+
+    assert not _server_trusted("mail.sysu.edu.cn.attacker.example", ["mail.sysu.edu.cn"])
+    assert _server_trusted("mail.sysu.edu.cn", ["mail.sysu.edu.cn"])
+    assert _server_trusted("mx1.mail.sysu.edu.cn", ["mail.sysu.edu.cn"])   # 合法子域
+
+
+def test_authserv_folded_header_ok() -> None:
+    """折行（continuation）的合法 Authentication-Results 头应被正确接受。"""
+    from mail_digest.processors.grants.processor import auth_sender_trusted
+
+    def mk(h):
+        return Mail(uid=1, folder="INBOX", message_id="", subject="x",
+                    from_="a@trusted.edu.cn", date=None, body_text="",
+                    body_html="", raw_path=Path(""), headers=h)
+
+    # 头在传输中折行，解析后为两行同一结果
+    folded = ("mail.sysu.edu.cn; spf=pass smtp.mailfrom=trusted.edu.cn"
+              " mail.sysu.edu.cn; dkim=pass header.d=trusted.edu.cn")
+    assert auth_sender_trusted(mk({"authentication-results": folded}),
+                               strict=True, allowed_servers="mail.sysu.edu.cn")
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -446,5 +540,9 @@ if __name__ == "__main__":
     test_legacy_cache_status_migration()
     test_authserv_id_trust()
     test_ads_push_sends_via_smtp()
+    test_legacy_failed_in_processed_gets_retried()
+    test_force_failure_clears_old_success_cache()
+    test_authserv_similar_domain_rejected()
+    test_authserv_folded_header_ok()
     test_grant_prompt_untrusted_boundary()
     print("✅ 全部本地测试通过（含安全回归）")

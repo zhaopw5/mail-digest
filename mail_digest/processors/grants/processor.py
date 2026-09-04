@@ -39,8 +39,20 @@ def _from_domain(from_header: str) -> str:
     return addr.split("@")[-1] if "@" in addr else ""
 
 
+def _server_trusted(server: str, allowed: list[str]) -> bool:
+    """authserv-id 精确或子域匹配（防 mail.sysu.edu.cn.attacker.example 之类的相似域名绕过）。"""
+    server = server.lower().rstrip(".")
+    for a in allowed:
+        a = a.lower().rstrip(".")
+        if not a:
+            continue
+        if server == a or server.endswith("." + a):
+            return True
+    return False
+
+
 def _filter_auth_servers(res: str, allowed: list[str]) -> str:
-    """只保留来自可信 authserv-id 的 Authentication-Results 行。"""
+    """只保留来自可信 authserv-id 的 Authentication-Results 行（含折行容错）。"""
     if not allowed:
         return res
     keep = []
@@ -48,8 +60,9 @@ def _filter_auth_servers(res: str, allowed: list[str]) -> str:
         line = line.strip()
         if not line:
             continue
-        server = line.split()[0].rstrip(";").strip().lower()
-        if any(s in server for s in allowed) or server in allowed:
+        tokens = line.split()
+        server = tokens[0].rstrip(";").strip()
+        if server and _server_trusted(server, allowed):
             keep.append(line)
     return "\n".join(keep)
 
@@ -330,6 +343,11 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     from ...core.config import sender_allowed
     processed = _load_ids(cfg.grants_processed_file)
     cache = _load_cache(cfg.grants_cache_file)
+    # 旧版本迁移：processed 中那些缓存标为失败的 uid，从 processed 剔除（进入本轮重试）
+    stale = {u for u in processed
+             if _cache_status(cache.get(str(u), {})) == "retryable_error"}
+    if stale:
+        processed -= stale
     todo = [m for m in grant_mails if force or m.uid not in processed]
     if not cfg.grant_allowed_senders.strip():
         print("⚠️  未配置 GRANT_ALLOWED_SENDERS（可信发件人白名单）——为防恶意附件，"
@@ -369,6 +387,8 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
                    "status": "retryable_error"}
         if res.get("status") != "retryable_error":
             cache[str(m.uid)] = res       # 可重试失败不落缓存，避免误复用
+        else:
+            cache.pop(str(m.uid), None)   # 清掉旧缓存（含旧成功），下次强制重处理
         results.append(res)
         if res.get("llm"):
             pn = res["llm"].get("project_name") or res["subject"][:30]
