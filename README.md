@@ -382,8 +382,15 @@ zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tes
   默认 false 是为兼容校内互发无认证头的场景）
 - 建议同时配置可信认证服务器白名单，只采信本校 MX 写入的认证结果（防伪造头）：
   ```env
-  GRANTS_AUTH_SERVERS=mail.sysu.edu.cn
+  GRANTS_AUTH_SERVERS=<authserv-id>
   ```
+  ⚠️ 重要前提（部署前必须验证）：`GRANTS_AUTH_SERVERS` 只能检查「头里写的是否为可信服务器名」，
+  **不能证明头真的由该服务器写入**。攻击者可自行伪造
+  `Authentication-Results: mail.sysu.edu.cn; spf=pass …` 这类头。
+  该防护成立的前提是：**接收方邮箱服务器（学校/腾讯 MX）会删除或重写外部邮件自带的
+  `Authentication-Results` 头，再写入自己的认证结果**。
+  部署前请用一封真实外部邮件验证（见第 14 节），并确认 `authserv-id`（
+  `Authentication-Results:` 后、分号前的服务器名，不一定等于发件邮箱域名）后填写。
 - 外部工具（unrar/7z/LibreOffice）当前以 `RLIMIT_FSIZE` 单文件限额 + 解压后复核兜底；
   对最高安全要求的环境建议再套容器/受限子进程。
 - 附件异常不会中断整批（单封记录并继续）；附件出错时正文结果仍会执行
