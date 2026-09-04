@@ -95,6 +95,9 @@ class Config:
     # 严格发件人认证：true 时要求 Authentication-Results 存在 pass 且与 From 域对齐；
     # 缺失头 / neutral 一律拒绝（默认 false，兼容校内互发无认证头场景）
     grants_strict_auth: bool = False
+    # 可信认证服务器（authserv-id）白名单，逗号分隔。非空时只采信这些服务器写入的
+    # Authentication-Results（防伪造认证头）；空 = 不校验来源（默认兼容）
+    grants_auth_servers: str = "" 
 
     # ---- 路径 ----
     data_dir: Path = PROJECT_ROOT / "data"
@@ -159,6 +162,7 @@ class Config:
             pass
         cfg.grant_allowed_senders = env.get("GRANT_ALLOWED_SENDERS", cfg.grant_allowed_senders)
         cfg.grants_strict_auth = env.get("GRANTS_STRICT_AUTH", "false").strip().lower() == "true"
+        cfg.grants_auth_servers = env.get("GRANTS_AUTH_SERVERS", cfg.grants_auth_servers)
         cfg.ads_enabled = env.get("ADS_ENABLED", "true").strip().lower() != "false"
         cfg.grants_enabled = env.get("GRANTS_ENABLED", "true").strip().lower() != "false"
         cfg.ads_llm_api_key = env.get("ADS_LLM_API_KEY", cfg.ads_llm_api_key)

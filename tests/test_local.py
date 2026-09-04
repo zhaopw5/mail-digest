@@ -366,6 +366,64 @@ def test_failed_mail_not_marked_processed() -> None:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
 
+
+def test_legacy_cache_status_migration() -> None:
+    """旧版本缓存（无 status 字段）按 error 推断：含 error → 需重试，无 error → 成功。"""
+    from mail_digest.processors.grants.processor import _cache_status
+
+    assert _cache_status({"error": "boom", "llm": None}) == "retryable_error"
+    assert _cache_status({"llm": {"project_name": "X"}}) == "ok"
+    assert _cache_status({"status": "manual_review"}) == "manual_review"
+    assert _cache_status({"status": "retryable_error"}) == "retryable_error"
+
+
+def test_authserv_id_trust() -> None:
+    """伪造服务器写的 pass 头：配置可信 authserv-id 后必须拒绝。"""
+    from mail_digest.processors.grants.processor import auth_sender_trusted
+
+    def mk(h):
+        return Mail(uid=1, folder="INBOX", message_id="", subject="x",
+                    from_="a@trusted.edu.cn", date=None, body_text="",
+                    body_html="", raw_path=Path(""), headers=h)
+
+    forged = mk({"authentication-results":
+                 "evil.example; spf=pass smtp.mailfrom=trusted.edu.cn"})
+    assert not auth_sender_trusted(forged, strict=True, allowed_servers="mail.sysu.edu.cn")
+    legit = mk({"authentication-results":
+                "mail.sysu.edu.cn; spf=pass smtp.mailfrom=trusted.edu.cn"})
+    assert auth_sender_trusted(legit, strict=True, allowed_servers="mail.sysu.edu.cn")
+
+
+def test_ads_push_sends_via_smtp() -> None:
+    """ADS push 有当天简报时真实走到 SMTP 发送（mock 网络）。"""
+    import os
+    import tempfile
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.imap_user = "me@test.edu.cn"
+            cfg.smtp_host = "smtp.test.edu.cn"
+            cfg.smtp_port = 465
+            (cfg.zh_digest_dir).mkdir(parents=True)
+            today = __import__("datetime").date.today()
+            (cfg.zh_digest_dir / f"ads_{today:%Y%m%d}_000001.zh.md").write_text(
+                "# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）\n\n### 1. 标题\n- 链接：https://ui.adsabs.harvard.edu/abs/2026ApJ...963..100A/abstract\n", encoding="utf-8")
+            sent = {}
+            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
+                ok = delivery.push(cfg)
+                m.assert_called_once()
+                sent["subject"] = m.call_args.args[2]
+            assert ok is True
+            assert "ADS 文献简报" in sent["subject"]
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -385,5 +443,8 @@ if __name__ == "__main__":
     test_deadline_multi_candidate_warning()
     test_attachment_error_returns_not_crashes()
     test_failed_mail_not_marked_processed()
+    test_legacy_cache_status_migration()
+    test_authserv_id_trust()
+    test_ads_push_sends_via_smtp()
     test_grant_prompt_untrusted_boundary()
     print("✅ 全部本地测试通过（含安全回归）")

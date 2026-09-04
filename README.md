@@ -380,6 +380,10 @@ zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tes
   ```
   （缺失 `Authentication-Results` 或 `spf=neutral` 的邮件一律不处理附件；
   默认 false 是为兼容校内互发无认证头的场景）
+- 建议同时配置可信认证服务器白名单，只采信本校 MX 写入的认证结果（防伪造头）：
+  ```env
+  GRANTS_AUTH_SERVERS=mail.sysu.edu.cn
+  ```
 - 外部工具（unrar/7z/LibreOffice）当前以 `RLIMIT_FSIZE` 单文件限额 + 解压后复核兜底；
   对最高安全要求的环境建议再套容器/受限子进程。
 - 附件异常不会中断整批（单封记录并继续）；附件出错时正文结果仍会执行

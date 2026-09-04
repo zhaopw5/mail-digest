@@ -39,7 +39,23 @@ def _from_domain(from_header: str) -> str:
     return addr.split("@")[-1] if "@" in addr else ""
 
 
-def auth_sender_trusted(mail, strict: bool = False) -> bool:
+def _filter_auth_servers(res: str, allowed: list[str]) -> str:
+    """只保留来自可信 authserv-id 的 Authentication-Results 行。"""
+    if not allowed:
+        return res
+    keep = []
+    for line in res.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        server = line.split()[0].rstrip(";").strip().lower()
+        if any(s in server for s in allowed) or server in allowed:
+            keep.append(line)
+    return "\n".join(keep)
+
+
+def auth_sender_trusted(mail, strict: bool = False,
+                        allowed_servers: str = "") -> bool:
     """发件人真实性（第二层）：Authentication-Results 判定。
 
     - 任一 SPF/DKIM/DMARC fail 族 → 不可信（拒绝）
@@ -48,8 +64,10 @@ def auth_sender_trusted(mail, strict: bool = False) -> bool:
     - 完全无 Authentication-Results（校内互发常见）→ 放行，仅依赖白名单
     """
     res = (mail.headers or {}).get("authentication-results", "") or ""
+    if allowed_servers and allowed_servers.strip():
+        res = _filter_auth_servers(res, [s.strip().lower() for s in allowed_servers.split(",") if s.strip()])
     if not res.strip():
-        return not strict               # 严格模式：缺失认证头一律拒绝
+        return not strict               # 严格模式：缺失/无可信服务器认证头 → 拒绝
     if _AUTH_FAIL_RE.search(res):
         return False
     from_dom = _from_domain(mail.from_ or "")
@@ -165,6 +183,10 @@ def process_mail(cfg: Config, mail: Mail, client: DeepSeekClient | None,
         text = mail.body_text.strip()[: text_cap]
         if work.exists():
             shutil.rmtree(work, ignore_errors=True)
+
+    # 附件 problems（损坏 zip/超大/不支持文档等，不可自动恢复）→ manual_review 语义
+    if result["status"] == "ok" and result["problems"]:
+        result["status"] = "manual_review"
 
     if client:
         try:
@@ -290,6 +312,14 @@ def build_daily_list(results: list[dict], when: date) -> str:
     return "\n".join(lines)
 
 
+def _cache_status(cached: dict) -> str:
+    """旧缓存迁移：早期版本无 status 字段——含 error 视为失败需重试，否则视为成功。"""
+    s = cached.get("status")
+    if s:
+        return s
+    return "retryable_error" if cached.get("error") else "ok"
+
+
 def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
              limit: int | None = None) -> tuple[int, str | None]:
     """处理基金邮件，返回 (处理封数, 当日清单文本 or None)。
@@ -307,7 +337,8 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         return 0, None
     trusted = [m for m in todo
                if sender_allowed(m.from_, cfg.grant_allowed_senders)
-               and auth_sender_trusted(m, strict=cfg.grants_strict_auth)]
+               and auth_sender_trusted(m, strict=cfg.grants_strict_auth,
+                                          allowed_servers=cfg.grants_auth_servers)]
     skipped = len(todo) - len(trusted)
     if skipped:
         print(f"⏭️  跳过 {skipped} 封未通过信任检查的邮件（发件人白名单/认证结果 fail，不做附件处理）")
@@ -325,7 +356,7 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     for m in todo:
         print(f"  ▶ [{m.uid}] 《{m.subject[:44]}》 附件处理中…")
         cached = cache.get(str(m.uid))
-        if cached and not force and cached.get("status") != "retryable_error":
+        if cached and not force and _cache_status(cached) != "retryable_error":
             results.append(cached)
             continue
         try:
@@ -348,7 +379,10 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     _save_cache(cfg.grants_cache_file, cache)
     completed = {r["uid"] for r in results
                  if r.get("status") in ("ok", "manual_review")}
-    _save_ids(cfg.grants_processed_file, processed | completed)
+    retryable_now = {r["uid"] for r in results
+                     if r.get("status") == "retryable_error"}
+    # force 重跑仍失败的旧 uid：从 processed 中剔除，下次自动重试
+    _save_ids(cfg.grants_processed_file, (processed | completed) - retryable_now)
 
     # 汇总：只汇总「今天收到」的通知（按邮件日期）
     today = date.today()
