@@ -250,20 +250,24 @@ def test_nested_zip_bomb_global_budget() -> None:
 
 def test_auth_results_fail_blocks() -> None:
     """Authentication-Results 判定 SPF/DKIM fail → 不可信（即使 From 在白名单域）。"""
-    from mail_digest.processors.grants.processor import auth_results_fail
+    from mail_digest.processors.grants.processor import auth_sender_trusted
 
     def _mk(headers: dict) -> Mail:
         return Mail(uid=1, folder="INBOX", message_id="", subject="x",
                     from_="a@mail.sysu.edu.cn", date=None, body_text="",
                     body_html="", raw_path=Path(""), headers=headers)
 
-    assert auth_results_fail(_mk({"authentication-results":
+    assert not auth_sender_trusted(_mk({"authentication-results":
         "mail.sysu.edu.cn; spf=fail smtp.mailfrom=a@evil.org"}))
-    assert auth_results_fail(_mk({"authentication-results":
+    assert not auth_sender_trusted(_mk({"authentication-results":
         "mx.example; dkim=hardfail header.d=evil.org"}))
-    assert not auth_results_fail(_mk({"authentication-results":
-        "mx.example; spf=pass smtp.mailfrom=a@mail.sysu.edu.cn; dkim=pass"}))
-    assert not auth_results_fail(_mk({}))                      # 无头不拦截（校内互发常见）
+    # pass 但错域（攻击者域 pass 而 From 为学校域）→ 拒绝
+    assert not auth_sender_trusted(_mk({"authentication-results":
+        "mx.example; spf=pass smtp.mailfrom=evil.org"}))
+    # pass 且与 From 域对齐 → 放行
+    assert auth_sender_trusted(_mk({"authentication-results":
+        "mx.example; spf=pass smtp.mailfrom=mail.sysu.edu.cn"}))
+    assert auth_sender_trusted(_mk({}))                        # 无头不拦截（校内互发常见）
 
 
 def test_evidence_validation() -> None:
@@ -283,6 +287,31 @@ def test_evidence_validation() -> None:
     assert any("不在附件清单中" in w for w in warns)
 
 
+
+def test_self_push_header_excluded() -> None:
+    """带 X-Mail-Digest-Agent 头的自推送邮件，两域分类器都必须排除。"""
+    from mail_digest.processors.ads.parser import is_ads_email
+    from mail_digest.processors.grants.classifier import is_grant_email
+
+    m = Mail(uid=1, folder="INBOX", message_id="", subject="项目申报机会清单 2026-09-04",
+             from_="me@mail.sysu.edu.cn", date=None,
+             body_text="申报项目摘要 https://ui.adsabs.harvard.edu/abs/2026A/abstract",
+             body_html="", raw_path=Path(""),
+             headers={"x-mail-digest-agent": "grants"})
+    assert not is_grant_email(m)
+    assert not is_ads_email(m)
+
+
+def test_deadline_multi_candidate_warning() -> None:
+    """存在多个截止语境日期时，datecheck 不再静默通过。"""
+    from mail_digest.processors.grants import datecheck as dc
+
+    text = "校内意向9月11日前反馈，正式申报截止2026年10月5日17:00。"
+    rule = dc.rule_dates(text, 2026)
+    warn = dc.cross_check("2026-10-05", rule, 2026)
+    assert "多个截止相关日期候选" in warn
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -298,5 +327,7 @@ if __name__ == "__main__":
     test_nested_zip_bomb_global_budget()
     test_auth_results_fail_blocks()
     test_evidence_validation()
+    test_self_push_header_excluded()
+    test_deadline_multi_candidate_warning()
     test_grant_prompt_untrusted_boundary()
     print("✅ 全部本地测试通过（含安全回归）")

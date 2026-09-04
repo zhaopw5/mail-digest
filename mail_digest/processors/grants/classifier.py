@@ -25,6 +25,8 @@ _GRANT_EXCLUDE = (
 
 
 def is_grant_email(mail: Mail) -> bool:
+    if (mail.headers or {}).get("x-mail-digest-agent"):
+        return False   # 本 Agent 自推送的邮件，不进入处理（防循环）
     """按主题关键词识别基金/项目申报通知（不看发件人）。"""
     subj = mail.subject or ""
     if len(subj) < 4:

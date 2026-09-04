@@ -300,8 +300,18 @@ def unpack_recursive(paths: list[Path], work: Path, depth: int = 0,
                 files = _extract_one(p, sub)
             except (AttachmentError, zipfile.BadZipFile, tarfile.TarError) as exc:
                 problems.append({"file": p.name, "error": str(exc)})
-                # 部分失败（如 rar 内个别文件名超长）时，已解出的文件仍保留可用
+                # 部分失败（如 rar 内个别文件名超长）时，已解出的文件保留可用，
+                # 但必须计入全局预算（防止经异常路径绕过总上限）
                 partial = [q for q in sub.rglob("*") if q.is_file()]
+                for q in partial:
+                    try:
+                        budget["bytes"] += q.stat().st_size
+                    except OSError:
+                        pass
+                    budget["files"] += 1
+                    if budget["bytes"] > MAX_EXTRACT_TOTAL or budget["files"] > MAX_FILES:
+                        raise AttachmentError(
+                            "整封邮件解压总量/文件数超过全局上限，已中止（疑似压缩炸弹）")
                 readable.extend(partial)
                 continue
             # 全局预算：跨所有层累计，超限中止整封（不再保留 partial）

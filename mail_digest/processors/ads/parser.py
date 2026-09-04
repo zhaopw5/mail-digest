@@ -107,6 +107,8 @@ _ADS_SUBJECT_HINTS = (
 
 
 def is_ads_email(mail: Mail) -> bool:
+    if (mail.headers or {}).get("x-mail-digest-agent"):
+        return False   # 本 Agent 自推送的邮件，不进入处理（防循环）
     subject_lower = mail.subject.lower()
     # 自推送邮件排除（防循环：正文含 ADS 链接的邮件可能是我们发出的简报）
     if any(w in subject_lower for w in _ADS_SELF_PUSH_HINTS):

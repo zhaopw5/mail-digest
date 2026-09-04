@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import email
 import imaplib
+import re
 from email.header import decode_header, make_header
 from email.utils import parsedate_to_datetime
 from pathlib import Path

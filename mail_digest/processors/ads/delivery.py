@@ -43,5 +43,5 @@ def push(cfg, when: date | None = None) -> bool:
         n_arts += sum(1 for line in f.read_text(encoding="utf-8").splitlines()
                       if line.startswith("### "))
     subject = f"ADS 文献简报 {when:%Y-%m-%d}（{n_arts} 条文献）"
-    send_html(cfg, cfg.imap_user, subject, doc)
+    send_html(cfg, cfg.imap_user, subject, doc, agent="ads")
     return True

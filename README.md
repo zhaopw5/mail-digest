@@ -207,10 +207,13 @@ pip install -e ".[all]"       # 两个都要
    ```
 4. **域开关**：只要其中一个 Agent，就在 .env 里 `ADS_ENABLED=false` 或 `GRANTS_ENABLED=false`；
    不想把基金附件发往云端模型时，只填 `ADS_LLM_API_KEY`（不填公共 `DEEPSEEK_API_KEY`）。
-5. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点：
+5. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点（注意：命令链用 `;`
+   分隔并重定向日志，确保某一步（如暂无 ADS 简报）不阻断推送）：
    ```cron
-   0 9 * * * cd /path/to/this/project && python3 main.py all && python3 main.py html && python3 main.py ads push && python3 main.py grants push
+   0 9 * * * cd /path/to/this/project && python3 main.py all; python3 main.py html; python3 main.py ads push; python3 main.py grants push >> data/cron.log 2>&1
    ```
+   也可用两个独立 Agent 入口分别定时：`ads-digest` / `grants-digest`（见 pyproject scripts）。
+   前提：机器在设定时间保持开机；错过可用 `python3 main.py all && python3 main.py ads push && python3 main.py grants push` 手动补跑。
 6. 产物：英文/中文简报与清单在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
    本地测试：`python3 tests/test_local.py`（无网络）。
 

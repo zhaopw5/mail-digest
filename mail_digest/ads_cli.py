@@ -13,8 +13,9 @@ import sys
 def main() -> None:
     if hasattr(os, "umask"):
         os.umask(0o077)
-    from mail_digest.cli import cmd_ads_push, cmd_ads_run, cmd_fetch, cmd_html
     from mail_digest.core.config import Config
+    from mail_digest.core.ops import cmd_fetch
+    from mail_digest.processors.ads.ops import cmd_ads_push, cmd_ads_run, cmd_html
 
     parser = argparse.ArgumentParser(
         prog="ads-digest",

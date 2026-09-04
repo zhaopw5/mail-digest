@@ -27,6 +27,38 @@ DEFAULT_TEXT_CAP = 12000          # 每封送入 LLM 的合并文本上限（字
 
 
 _AUTH_FAIL_RE = re.compile(r"(?:spf|dkim|dmarc)\s*=\s*(fail|hardfail|softfail)(?=\s|;|$)", re.I)
+# 对齐域参数：spf=pass smtp.mailfrom=域 / dkim=pass header.d=域 / dmarc=pass from=域
+_AUTH_DOMAIN_RE = re.compile(
+    r"(?:spf|dkim|dmarc)\s*=\s*pass\b[^;]*?(?:smtp\.mailfrom|header\.d|from)\s*=\s*([^\s;]+)", re.I)
+
+
+def _from_domain(from_header: str) -> str:
+    m = re.search(r"<([^>]+)>", from_header or "")
+    addr = (m.group(1) if m else from_header or "").strip().lower()
+    return addr.split("@")[-1] if "@" in addr else ""
+
+
+def auth_sender_trusted(mail) -> bool:
+    """发件人真实性（第二层）：Authentication-Results 判定。
+
+    - 任一 SPF/DKIM/DMARC fail 族 → 不可信（拒绝）
+    - 存在 pass 结果时：至少一个 pass 的对齐域与 From 域一致才放行，
+      否则（错域 pass / 无对齐信息）视为不可信
+    - 完全无 Authentication-Results（校内互发常见）→ 放行，仅依赖白名单
+    """
+    res = (mail.headers or {}).get("authentication-results", "") or ""
+    if not res.strip():
+        return True
+    if _AUTH_FAIL_RE.search(res):
+        return False
+    from_dom = _from_domain(mail.from_ or "")
+    pass_domains = {m.group(1).strip("<>").lower().split("@")[-1]
+                    for m in _AUTH_DOMAIN_RE.finditer(res)}
+    if not pass_domains:
+        return True                       # 无 fail 也无 pass（neutral 等）→ 白名单兜底
+    return from_dom in pass_domains       # 需有 pass 域与 From 域一致（防错域 pass）
+
+
 
 
 def validate_evidence(llm: dict, text: str, attach_names: list) -> list[str]:
@@ -229,7 +261,7 @@ def build_daily_list(results: list[dict], when: date) -> str:
         out.append(f"- 主题：{res['subject']}")
         if res.get("problems"):
             out.append("- ⚠️ " + "；".join(res["problems"]))
-        if res.get("error") and not llm:
+        if res.get("error"):
             out.append(f"- ⚠️ {res['error']}")
         out.append("")
         return out
@@ -256,7 +288,7 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
         return 0, None
     trusted = [m for m in todo
                if sender_allowed(m.from_, cfg.grant_allowed_senders)
-               and not auth_results_fail(m)]
+               and auth_sender_trusted(m)]
     skipped = len(todo) - len(trusted)
     if skipped:
         print(f"⏭️  跳过 {skipped} 封未通过信任检查的邮件（发件人白名单/认证结果 fail，不做附件处理）")

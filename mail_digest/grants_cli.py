@@ -13,8 +13,9 @@ import sys
 def main() -> None:
     if hasattr(os, "umask"):
         os.umask(0o077)
-    from mail_digest.cli import cmd_fetch, cmd_grants_push, cmd_grants_run
     from mail_digest.core.config import Config
+    from mail_digest.core.ops import cmd_fetch
+    from mail_digest.processors.grants.ops import cmd_grants_push, cmd_grants_run
 
     parser = argparse.ArgumentParser(
         prog="grants-digest",

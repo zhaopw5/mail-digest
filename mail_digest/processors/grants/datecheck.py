@@ -75,4 +75,11 @@ def cross_check(deadline_iso: str, rule: list[dict], ref_year: int) -> str:
         others = "、".join(sorted(rule_isos)[:8])
         return (f"⚠️ 模型截止 {deadline_iso} 与规则独立提取的日期（{others}）"
                 f"不一致——请对照下方原文证据核对（谨防文档注入篡改）")
+    # 命中但文本里还有多个「截止/受理/申报」语境候选 → 保守提示人工确认
+    ctx = [r for r in rule
+           if any(w in r["quote"] for w in ("截止", "受理", "申报", "提交"))]
+    ctx_isos = sorted({r["iso"] for r in ctx})
+    if len(ctx_isos) > 1:
+        return (f"⚠️ 文本存在多个截止相关日期候选（{'、'.join(ctx_isos[:8])}），"
+                f"模型采用 {deadline_iso}——请对照原文证据人工确认")
     return ""
