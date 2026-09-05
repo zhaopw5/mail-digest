@@ -112,8 +112,11 @@ def build_ads_digest_zh(mail: Mail, sections: list[tuple[str, list[ADSArticle]]]
         lines.append("")
         for i, art in enumerate(articles, 1):
             zh = zh_map.get(art.bibcode, {})
-            title = zh.get("zh_title") or art.title or art.bibcode
-            lines.append(f"### {i}. {title}")
+            en_title = art.title or art.bibcode
+            zh_title = (zh.get("zh_title") or "").strip()
+            lines.append(f"### {i}. {en_title}")          # 英文原题在前
+            if zh_title and zh_title != en_title:
+                lines.append(f"- **中文题目**：{zh_title}")   # 中文翻译随行
             note = (zh.get("note") or "").strip()
             grade = zh.get("grade") or ""
             if note:
