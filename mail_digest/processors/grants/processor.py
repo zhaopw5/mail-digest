@@ -405,10 +405,8 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     # force 重跑仍失败的旧 uid：从 processed 中剔除，下次自动重试
     _save_ids(cfg.grants_processed_file, (processed | completed) - retryable_now)
 
-    # 汇总：只汇总「今天收到」的通知（按邮件日期）
-    today = date.today()
-    today_results = [r for r in results
-                     if r["date"].startswith(today.strftime("%Y-%m-%d"))]
-    if not today_results:
+    # 汇总：本次新处理（含跨天积压）全部进入「当日清单」——
+    # 若只按邮件日期==今天过滤，昨天下午到达、今早才处理的通知会静默漏推。
+    if not results:
         return len(todo), None
-    return len(todo), build_daily_list(today_results, today)
+    return len(todo), build_daily_list(results, date.today())
