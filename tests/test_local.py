@@ -557,6 +557,33 @@ def test_ads_push_empty_sends_status() -> None:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
 
+
+def test_grants_push_empty_sends_status() -> None:
+    """申报无新清单时，默认推送应发送『今日无新申报通知』状态邮件；--date 不打扰。"""
+    import os
+    import tempfile
+    from argparse import Namespace
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.grants.ops import cmd_grants_push
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.imap_user = "me@test.edu.cn"
+            cfg.smtp_host = "smtp.test.edu.cn"
+            cfg.smtp_port = 465
+            with mock.patch("mail_digest.processors.grants.ops._send_grants_status_empty") as st:
+                cmd_grants_push(cfg, Namespace(date=None, dry_run=False))
+                st.assert_called_once_with(cfg)      # 默认无清单 → 发状态
+            with mock.patch("mail_digest.processors.grants.ops._send_grants_status_empty") as st2:
+                cmd_grants_push(cfg, Namespace(date="2026-01-01", dry_run=False))
+                st2.assert_not_called()              # 指定历史日期 → 不打扰
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -580,6 +607,7 @@ if __name__ == "__main__":
     test_authserv_id_trust()
     test_ads_push_sends_via_smtp()
     test_ads_push_empty_sends_status()
+    test_grants_push_empty_sends_status()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()

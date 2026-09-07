@@ -44,10 +44,16 @@ def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
         print("（今天没有当天收到的通知，清单未生成；结果已缓存）")
 
 def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
-    when = _parse_date_arg(getattr(args, "date", None)) or date.today()
+    explicit = getattr(args, "date", None)
+    when = _parse_date_arg(explicit) or date.today()
     f = cfg.digest_dir / f"fund_{when:%Y%m%d}.md"
     if not f.exists():
-        print(f"ℹ️  {when:%Y-%m-%d} 无申报清单文件（当日无通知或未先运行 grants run）")
+        if explicit is None and not getattr(args, "dry_run", False):
+            # 每天都要有申报状态：默认推送且当日无清单 → 发『今日无新申报通知』状态邮件
+            _send_grants_status_empty(cfg)
+            print(f"ℹ️  {when:%Y-%m-%d} 无新的申报通知——已发送『今日无新申报通知』状态邮件到 {cfg.imap_user}")
+        else:
+            print(f"ℹ️  {when:%Y-%m-%d} 无申报清单文件（当日无通知或未先运行 grants run）")
         return
     if getattr(args, "dry_run", False):
         print(f"（dry-run）将发送 {when:%Y-%m-%d} 申报清单 → {cfg.imap_user}，不连接 SMTP")
@@ -55,3 +61,18 @@ def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
     send_markdown(cfg, f"项目申报机会清单 {when:%Y-%m-%d}",
                   f.read_text(encoding="utf-8"))
     print(f"✅ 已发送申报清单到 {cfg.imap_user}")
+
+
+def _send_grants_status_empty(cfg: Config) -> None:
+    """发送『今日无新申报通知』状态邮件（让用户每天都能确认 Agent 已检查）。"""
+    from ...core.push import send_html
+
+    today = date.today()
+    html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>项目申报状态</title></head>
+<body style="font-family:sans-serif;max-width:640px;margin:2em auto;line-height:1.7">
+<h2 style="color:#0b3d91">项目申报 Agent · 每日状态 {today:%Y-%m-%d}</h2>
+<p><strong>今天没有发现新的基金/项目申报通知</strong>，因此没有生成申报机会清单。</p>
+<p>本邮件用于确认每日自动检查已正常运行（学院今天未转发新的申报通知，或新通知将在之后到达）。</p>
+<p style="color:#888">mail-digest 每日自动运行 · 有新申报通知时你会收到详细清单，无新通知时收到本状态邮件。</p>
+</body></html>"""
+    send_html(cfg, cfg.imap_user, f"项目申报状态 {today:%Y-%m-%d}：今日无新申报通知", html)
