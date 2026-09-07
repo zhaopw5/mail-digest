@@ -142,8 +142,32 @@ def cmd_ads_push(cfg: Config, args: argparse.Namespace) -> None:
     label = when.strftime("%Y-%m-%d") if when else "今天"
     if ok:
         print(f"✅ 已将 {label} 的 ADS 中文简报发送到 {cfg.imap_user}")
+    elif when is None:
+        # 每天都要有 ADS 状态：无新推送也发一封简短状态邮件（而非静默）
+        _send_ads_status_empty(cfg)
+        print(f"ℹ️  {label} 无新的 ADS 推送——已发送『无新推送』状态邮件到 {cfg.imap_user}")
     else:
-        print(f"ℹ️  {label} 没有 ADS 推送邮件，未发送")
+        print(f"ℹ️  {label} 没有 ADS 推送邮件（指定历史日期，不发状态）")
+
+
+def _send_ads_status_empty(cfg: Config) -> None:
+    """发送『今日无新 ADS 推送』状态邮件（让用户每天都能确认 Agent 已检查）。"""
+    from datetime import date
+    from ...core.push import send_html
+
+    today = date.today()
+    html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>ADS 文献状态</title></head>
+<body style="font-family:sans-serif;max-width:640px;margin:2em auto;line-height:1.7">
+<h2 style="color:#0b3d91">ADS 文献 Agent · 每日状态 {today:%Y-%m-%d}</h2>
+<p><strong>今天没有收到新的 myADS 文献推送</strong>，因此没有生成新的文献简报。</p>
+<p>本邮件用于确认每日自动检查已正常运行。原因通常为：</p>
+<ul>
+  <li>ADS 当天没有发布命中你订阅关键词（<code>grb_cosmicray</code> / <code>solaractivity_cosmicray</code>）的新文献；</li>
+  <li>或新文献推送尚未到达本邮箱（可到 ADS 网站检查订阅状态）。</li>
+</ul>
+<p style="color:#888">mail-digest 每日自动运行 · 有推送时你会收到详细简报，无推送时收到本状态邮件。</p>
+</body></html>"""
+    send_html(cfg, cfg.imap_user, f"ADS 文献状态 {today:%Y-%m-%d}：今日无新推送", html)
 
 def cmd_html(cfg: Config, args: argparse.Namespace) -> None:
     files = sorted(cfg.zh_digest_dir.glob("*.zh.md"))

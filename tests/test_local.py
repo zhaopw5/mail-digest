@@ -532,6 +532,31 @@ def test_authserv_folded_spoof_rejected() -> None:
     assert not auth_sender_trusted(mail, strict=True, allowed_servers="mail.sysu.edu.cn")
 
 
+
+def test_ads_push_empty_sends_status() -> None:
+    """ADS 无新推送时，默认推送应发送『今日无新推送』状态邮件（不静默）。"""
+    import os
+    import tempfile
+    from argparse import Namespace
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.ads.ops import cmd_ads_push
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.imap_user = "me@test.edu.cn"
+            cfg.smtp_host = "smtp.test.edu.cn"
+            cfg.smtp_port = 465
+            with mock.patch("mail_digest.processors.ads.ops.push", return_value=False), \
+                 mock.patch("mail_digest.processors.ads.ops._send_ads_status_empty") as st:
+                cmd_ads_push(cfg, Namespace(date=None, dry_run=False))
+                st.assert_called_once_with(cfg)     # 空推送必须走状态邮件
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -554,6 +579,7 @@ if __name__ == "__main__":
     test_legacy_cache_status_migration()
     test_authserv_id_trust()
     test_ads_push_sends_via_smtp()
+    test_ads_push_empty_sends_status()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()
