@@ -49,7 +49,8 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
                        cfg.ads_request_interval) if not offline else None
     llm_key = cfg.ads_llm_key()
     llm = (DeepSeekClient(llm_key, cfg.deepseek_model, cfg.deepseek_base_url,
-                          cfg.llm_request_interval) if llm_key else None)
+                          cfg.llm_request_interval,
+                          usage_log=str(cfg.llm_usage_log_file)) if llm_key else None)
     if not llm:
         print("ℹ️  未配置 LLM key（ADS_LLM_API_KEY 或 DEEPSEEK_API_KEY），跳过中文翻译/点评")
     zh_cache = _load_json_obj(cfg.llm_cache_file)

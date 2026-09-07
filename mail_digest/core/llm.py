@@ -16,12 +16,14 @@ class LLMError(Exception):
 
 class DeepSeekClient:
     def __init__(self, api_key: str, model: str = "deepseek-chat",
-                 base_url: str = "https://api.deepseek.com", interval: float = 0.2):
+                 base_url: str = "https://api.deepseek.com", interval: float = 0.2,
+                 usage_log=None):
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.interval = interval
         self._last_call = 0.0
+        self.usage_log = usage_log          # 可选：每次调用追加 usage 到该文件（JSON Lines）
 
     def complete_json(self, messages: list[dict], temperature: float = 0.2,
                       timeout: int = 120) -> dict:
@@ -48,6 +50,7 @@ class DeepSeekClient:
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 content = data["choices"][0]["message"]["content"]
+                self._log_usage(data)
                 return json.loads(content)
             except urllib.error.HTTPError as exc:
                 if exc.code in (429, 500, 502, 503) and attempt < 2:
@@ -69,6 +72,26 @@ class DeepSeekClient:
                     continue
                 raise LLMError(f"DeepSeek 返回无法解析: {exc}") from exc
         raise LLMError("DeepSeek 请求失败（重试后仍失败）")
+
+    def _log_usage(self, data: dict) -> None:
+        """记录本次调用的 token 用量（供成本审计；需 API 返回 usage）。"""
+        if not self.usage_log:
+            return
+        try:
+            u = data.get("usage") or {}
+            d = u.get("prompt_tokens_details") or {}
+            rec = {
+                "ts": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+                "model": self.model,
+                "prompt_tokens": u.get("prompt_tokens", 0),
+                "completion_tokens": u.get("completion_tokens", 0),
+                "cache_hit": u.get("prompt_cache_hit_tokens", d.get("cached_tokens", 0)),
+                "cache_miss": u.get("prompt_cache_miss_tokens", 0),
+            }
+            with open(self.usage_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception:
+            pass                     # 用量记录失败不影响调用
 
     def _throttle(self) -> None:
         wait = self.interval - (time.monotonic() - self._last_call)

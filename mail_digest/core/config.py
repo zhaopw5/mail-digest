@@ -107,7 +107,8 @@ class Config:
     processed_file: Path = PROJECT_ROOT / "data" / "processed.json"        # ADS 处理状态
     llm_cache_file: Path = PROJECT_ROOT / "data" / "llm_cache.json"        # ADS 翻译缓存
     grants_processed_file: Path = PROJECT_ROOT / "data" / "processed_fund.json"  # 基金状态
-    grants_cache_file: Path = PROJECT_ROOT / "data" / "fund_cache.json"    # 基金提取缓存
+    grants_cache_file: Path = PROJECT_ROOT / "data" / "fund_cache.json"
+    llm_usage_log_file: Path = PROJECT_ROOT / "data" / "llm_usage.log"    # 基金提取缓存
 
     # ---- 行为 ----
     default_recent: int = 50            # fetch 默认拉最近 N 封

@@ -370,7 +370,8 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     client = None
     if cfg.grants_llm_key():
         client = DeepSeekClient(cfg.grants_llm_key(), cfg.deepseek_model,
-                                cfg.deepseek_base_url, cfg.llm_request_interval)
+                                cfg.deepseek_base_url, cfg.llm_request_interval,
+                                usage_log=str(cfg.llm_usage_log_file))
     results: list[dict] = []
     for m in todo:
         print(f"  ▶ [{m.uid}] 《{m.subject[:44]}》 附件处理中…")
