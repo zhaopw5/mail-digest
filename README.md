@@ -395,3 +395,100 @@ zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tes
   对最高安全要求的环境建议再套容器/受限子进程。
 - 附件异常不会中断整批（单封记录并继续）；附件出错时正文结果仍会执行
   证据与日期交叉校验（防提示词注入借附件异常绕过）。
+
+## 16. 新手配置指南：邮箱服务器与 .env（以中山大学为例）
+
+> 如果你想让同单位/同学院的人也能用本工具，把这一节转给他们即可。
+> 最常见的问题：**服务器地址填错**（学生的邮箱系统跟老师的不一样，填错会一直 "Login fail"）。
+
+### 16.1 先搞清两件事：你的邮箱是哪一套系统？授权码在哪生成？
+
+登录你邮箱的**网页端**，先看"设置 → 客户端设置/邮箱设置"：
+
+- **中山大学教工邮箱**（`你的NetID@mail.sysu.edu.cn`，网页端 mail.sysu.edu.cn）：Coremail 系统
+- **中山大学学生邮箱**（`你的NetID@mail2.sysu.edu.cn`，网页端 mail2.sysu.edu.cn）：**网易企业邮箱校园邮**系统
+
+两者**服务器完全不同**（常见坑）：
+
+| 身份 | 邮箱地址 | 邮件系统 | IMAP（收信） | SMTP（发信，推送用） |
+|---|---|---|---|---|
+| **教工/老师** | `<NetID>@mail.sysu.edu.cn` | Coremail | `mail.sysu.edu.cn` : 993 (SSL) | `mail.sysu.edu.cn` : 465 (SSL) |
+| **学生** | `<NetID>@mail2.sysu.edu.cn` | 网易企业邮箱校园邮 | `imaphz.qiye.163.com` : 993 (SSL) | `smtphz.qiye.163.com` : 465 (SSL) |
+
+**通用判断方法**（任何学校都适用）：网页端邮箱 →「设置 → 客户端设置/帮助」页面会写明 IMAP/SMTP 服务器地址；不要凭域名猜。
+
+### 16.2 授权码（不是登录密码！）
+
+客户端登录**必须用"授权码/客户端专用密码"**，不能用网页登录密码：
+
+- **教工（Coremail）**：网页端 mail.sysu.edu.cn → 设置 → 客户端设置 → 生成/获取授权码（16 位；**可能含 `#` 等符号，属正常**，复制时别漏字符）
+- **学生（网易校园邮）**：网页端 mail2.sysu.edu.cn → 设置 → 客户端设置 → 勾选 IMAP/SMTP → 生成客户端授权密码
+
+> 授权码与账号绑定：老师的授权码不能给学生邮箱用。忘了就重新生成，旧码自动作废。
+
+### 16.3 .env 关键参数逐个说明
+
+复制 `cp .env.example .env` 后填写：
+
+| 参数 | 含义 | 必填？ |
+|---|---|---|
+| `IMAP_USER` | **完整邮箱地址**（含 @ 域名） | ✅ |
+| `IMAP_AUTH_CODE` | 上一步拿到的 16 位授权码 | ✅ |
+| `IMAP_HOST` | IMAP 服务器（见 16.1 表） | ✅ |
+| `IMAP_PORT` | `993`（SSL） | 默认即可 |
+| `SMTP_HOST` / `SMTP_PORT` | 发信服务器 / `465`（SSL）——**推送邮件给自己才需要** | 推送则必填 |
+| `ADS_API_TOKEN` | NASA ADS 的 API token（[免费申请](https://ui.adsabs.harvard.edu/user/settings/token)），**只用申报 Agent 可留空** | 用 ADS 才填 |
+| `GRANT_ALLOWED_SENDERS` | **负责给你转发申报通知的那位老师的完整邮箱**，逗号分隔可多个 | 用申报 Agent 必填 |
+| `DEEPSEEK_API_KEY` | DeepSeek key（中文翻译/点评/提取用），[申请](https://platform.deepseek.com) | 要 AI 处理才填 |
+| `ADS_ENABLED` / `GRANTS_ENABLED` | 开关：只要其中一个 Agent 时把另一个设 `false` | 按需 |
+| `ADS_LLM_API_KEY` / `GRANTS_LLM_API_KEY` | 可选：给单个 Agent 用独立 key（不回退公共） | 可选 |
+| `GRANTS_STRICT_AUTH` | `true` = 只处理通过了邮箱服务器 SPF/DKIM 认证的申报邮件（更安全，见第 13 节） | 可选 |
+| `MAIL_DIGEST_DATA_DIR` | 数据目录（默认项目内 `data/`），多人部署时建议各自独立目录 | 可选 |
+
+**两个完整示例**：
+
+老师（Coremail）：
+```env
+IMAP_HOST=mail.sysu.edu.cn
+IMAP_PORT=993
+IMAP_USER=zhanglaoshi@mail.sysu.edu.cn
+IMAP_AUTH_CODE=你的16位授权码
+SMTP_HOST=mail.sysu.edu.cn
+SMTP_PORT=465
+ADS_API_TOKEN=sk-（ADS 申请）
+GRANT_ALLOWED_SENDERS=sshanshan@mail.sysu.edu.cn   # 改成你学院负责转发申报通知的人
+DEEPSEEK_API_KEY=sk-（DeepSeek 申请）
+```
+
+学生（网易校园邮）：
+```env
+IMAP_HOST=imaphz.qiye.163.com       # 别填成 mail.sysu.edu.cn！
+IMAP_PORT=993
+IMAP_USER=xuesheng@mail2.sysu.edu.cn
+IMAP_AUTH_CODE=你的16位授权码
+SMTP_HOST=smtphz.qiye.163.com
+SMTP_PORT=465
+ADS_API_TOKEN=
+GRANT_ALLOWED_SENDERS=你的科研秘书或转发人邮箱
+DEEPSEEK_API_KEY=sk-...
+```
+
+### 16.4 常见坑（都是实测踩过的）
+
+1. **授权码 ≠ 登录密码**；授权码里出现 `#` 属正常，别截断别加空格。
+2. **用户名 = 完整邮箱地址**（含 `@mail…` 后缀）。
+3. **学生邮箱千万别填成 `mail.sysu.edu.cn`**——那是教工 Coremail 的服务器，学生账号在上面登录必然 "Login fail"。
+4. 改了 `.env` **不用重启任何常驻服务**（每次运行命令时重新读取）。
+5. 第一次跑用 `python3 main.py fetch --recent 10`，能看到邮件列表就说明 IMAP 配置对了；看不到请逐项核对 16.1/16.2。
+6. 想把处理范围只限定"某一位发件人"，把 `GRANT_ALLOWED_SENDERS` 填成他的完整邮箱即可（第 13 节有安全说明）。
+
+### 16.5 给"同事也想用"的最小改动清单
+
+别人 clone 仓库后，只需要：
+1. `cp .env.example .env`
+2. 按 16.1/16.2 填**自己的** `IMAP_USER / IMAP_AUTH_CODE / IMAP_HOST`（教师/学生不同）
+3. 按需填 `ADS_API_TOKEN`、`DEEPSEEK_API_KEY`
+4. 把 `GRANT_ALLOWED_SENDERS` 改成**他学院那位发申报通知的人**（不是默认通配）
+5. `python3 main.py fetch --recent 10` 验证，然后 `main.py ads run / grants run / … push`
+
+> 每个人的 `.env`、`data/` 都是私有的（gitignore 不提交）；多人各自机器部署互不影响。
