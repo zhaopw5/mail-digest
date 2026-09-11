@@ -139,7 +139,7 @@ def _fallback_candidates(cfg) -> list[dict]:
     return out
 
 
-def digest_candidates(cfg) -> list[dict]:
+def digest_candidates(cfg, bootstrap: bool = True) -> list[dict]:
     """当前可推送的 ADS 简报 → [{source_id, file, received_at}]。
 
     来源是 `ads_manifest.json` 中 status=ready 的条目（按 source_id 精确关联），
@@ -149,7 +149,7 @@ def digest_candidates(cfg) -> list[dict]:
     by_name = {rec.get("source_id"): rec for rec in index["emails"].values()
                if rec.get("source_id")}
     out: list[dict] = []
-    mf = load_manifest(cfg)
+    mf = load_manifest(cfg, persist_bootstrap=bootstrap)
     manifest_present = cfg.ads_manifest_file.exists()
     for sid, it in mf.get("items", {}).items():
         if it.get("status") != "ready":
@@ -212,7 +212,7 @@ def fetch_evidence(cfg) -> dict:
             "uncovered_below": rec.get("uncovered_below")}
 
 
-def select_official(cfg, state: dict, cutoff: datetime):
+def select_official(cfg, state: dict, cutoff: datetime, bootstrap: bool = True):
     """按正式语义挑选待发送项。
 
     返回 (to_send, failed_pending, unknown)：
@@ -221,13 +221,13 @@ def select_official(cfg, state: dict, cutoff: datetime):
       unknown        —— True 表示本地邮件缓存读不出来，无法断言是否有新邮件
     """
     sent_ids = {sid for sid, it in state["items"].items() if it.get("official_sent_at")}
-    cands = digest_candidates(cfg)
+    cands = digest_candidates(cfg, bootstrap=bootstrap)
     to_send = [c for c in cands
                if c["source_id"]
                and (c["received_at"] is None or c["received_at"] <= cutoff)
                and c["source_id"] not in sent_ids]
     known_ids = {c["source_id"] for c in cands}
-    mf = load_manifest(cfg)
+    mf = load_manifest(cfg, persist_bootstrap=bootstrap)
     tracked = set(mf.get("items", {}))       # manifest 已登记的（ready/empty/retryable）
     failed = set()
     for sid in failed_source_ids(mf):
@@ -411,7 +411,7 @@ def _push_official_locked(cfg, cutoff: datetime | None) -> dict:
 
 def push_test(cfg, when: date | None = None) -> dict:
     """测试推送：真实发送（标题加 [TEST]），但不修改任何正式状态。"""
-    entries = digest_candidates(cfg)
+    entries = digest_candidates(cfg, bootstrap=False)
     if when is not None:
         entries = [e for e in entries
                    if e.get("received_at") and e["received_at"].date() == when]
@@ -424,7 +424,7 @@ def push_test(cfg, when: date | None = None) -> dict:
 def preview(cfg, when: date | None = None) -> str:
     """dry-run：只描述将发送的内容，不发送、不改状态。"""
     if when is not None:
-        entries = [c for c in digest_candidates(cfg)
+        entries = [c for c in digest_candidates(cfg, bootstrap=False)
                    if c.get("received_at") and c["received_at"].date() == when]
         failed: set = set()
         unknown = False
@@ -433,18 +433,21 @@ def preview(cfg, when: date | None = None) -> str:
     else:
         state = load_state(cfg)                  # 损坏同样中止（与正式行为一致）
         cutoff = cfg.planned_cutoff()
-        entries, failed, unknown = select_official(cfg, state, cutoff)
+        entries, failed, unknown = select_official(cfg, state, cutoff, bootstrap=False)
         kind = f"正式推送语义（截止点 {cutoff:%Y-%m-%d %H:%M} 前全部未正式发送）"
+    pending_note = ""
+    if not cfg.ads_manifest_file.exists():
+        pending_note = "；提示：ads_manifest.json 尚未建立（旧记录未迁移），本次预览未写入迁移结果"
     if not entries:
         extra = f"；另有 {len(failed)} 封处理失败待重试" if failed else ""
         if unknown:
             extra += "；⚠️ 本地邮件缓存读取失败，无法断言邮箱无新邮件"
-        return f"（dry-run）{kind}{extra}：无待发送内容 → 正式运行将发送状态邮件"
+        return f"（dry-run）{kind}{extra}：无待发送内容 → 正式运行将发送状态邮件{pending_note}"
     labels = sorted({_display_date(c) for c in entries})
     span = labels[0] if len(labels) == 1 else f"{labels[0]} ~ {labels[-1]}"
     extra = f"；另有 {len(failed)} 封处理失败待重试" if failed else ""
     return (f"（dry-run）{kind}：将合并发送 {len(entries)} 份简报（{span}）"
-            f"→ {cfg.imap_user}，不连接 SMTP{extra}")
+            f"→ {cfg.imap_user}，不连接 SMTP{extra}{pending_note}")
 
 
 def state_init(cfg, last_official: str, mark_existing_sent: bool = False,
@@ -482,13 +485,14 @@ def state_init(cfg, last_official: str, mark_existing_sent: bool = False,
     if dry_run:
         # 只预览：列出将被标记/保留的邮件，不写任何文件
         preview_lines: list[str] = []
-        for c in sorted(digest_candidates(cfg), key=lambda x: x.get("received_at") or cutoff):
+        for c in sorted(digest_candidates(cfg, bootstrap=False),
+                        key=lambda x: x.get("received_at") or cutoff):
             recv = c.get("received_at")
             if recv is not None and recv > cutoff:
                 preview_lines.append(f"  · 保留待发送（晚于截止点）：{c['source_id']} ← {c['file'].name}")
             else:
                 preview_lines.append(f"  · 将标记已发送：{c['source_id']} ← {c['file'].name}")
-        return ("（dry-run）state-init 不会写入任何文件\n"
+        return ("（dry-run）state-init 不会写入任何文件（含迁移结果与备份）\n"
                 f"  · 截止点将设为：{cutoff.isoformat(timespec='seconds')}\n"
                 f"  · 现有状态：{'存在，执行时将先备份' if exists else '不存在'}\n"
                 f"  · 候选简报 {len(preview_lines)} 份：\n" + "\n".join(preview_lines))

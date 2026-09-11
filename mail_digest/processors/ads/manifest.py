@@ -23,8 +23,12 @@ SCHEMA_VERSION = 1
 DONE_STATUSES = ("ready", "empty")      # 视为「已处理完毕」，不再重跑
 
 
-def load_manifest(cfg) -> dict:
-    """读处理状态；文件缺失时自动从旧的 processed.json + 简报文件推导一次。"""
+def load_manifest(cfg, persist_bootstrap: bool = True) -> dict:
+    """读处理状态；文件缺失时自动从旧的 processed.json + 简报文件推导一次。
+
+    persist_bootstrap=False 时只做**内存**推导，不写 manifest、不写备份、不打印
+    落盘提示——预览（--dry-run）必须保证"不写任何文件"这一承诺。
+    """
     path = cfg.ads_manifest_file
     try:
         raw = load_json_strict(path, None)
@@ -34,8 +38,8 @@ def load_manifest(cfg) -> dict:
         ) from exc
     if raw is None:
         mf = {"schema_version": SCHEMA_VERSION, "items": {}}
-        migrated = bootstrap_from_legacy(cfg, mf)
-        if migrated:
+        migrated = bootstrap_from_legacy(cfg, mf, persist=persist_bootstrap)
+        if migrated and persist_bootstrap:
             save_manifest(cfg, mf)
         return mf
     if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
@@ -68,7 +72,7 @@ def failed_source_ids(mf: dict) -> set[str]:
             if it.get("status") == "retryable_error"}
 
 
-def bootstrap_from_legacy(cfg, mf: dict) -> int:
+def bootstrap_from_legacy(cfg, mf: dict, persist: bool = True) -> int:
     """一次性迁移：旧的 processed.json（裸 UID）→ manifest（完整 source_id）。
 
     **旧记录一律迁移为 retryable_error，不认定为 ready。** 原因：旧版本在处理
@@ -137,7 +141,7 @@ def bootstrap_from_legacy(cfg, mf: dict) -> int:
             "updated_at": datetime.now(cfg.tz()).isoformat(timespec="seconds"),
         }
         n += 1
-    if n:
+    if n and persist:
         try:
             bak = cfg.processed_file.with_name("processed.json.legacy.bak")
             if cfg.processed_file.exists() and not bak.exists():
@@ -146,6 +150,8 @@ def bootstrap_from_legacy(cfg, mf: dict) -> int:
             print(f"⚠️  旧 processed.json 备份失败（{exc}）：迁移继续，但请自行留存该文件")
         print(f"ℹ️  已把旧 processed.json 中的 {n} 封邮件迁移为「待重试」"
               "（不再以文件存在认定成功）；下次 ads run 会重新处理并核对完整性")
+    elif n:
+        print(f"ℹ️  检测到旧 processed.json 中的 {n} 封邮件记录（预览模式：未写入迁移结果）")
     return n
 
 

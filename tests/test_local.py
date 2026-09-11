@@ -1507,6 +1507,66 @@ def test_empty_status_not_reported_as_processing_failure() -> None:
             _cleanup_env()
 
 
+
+
+def test_invalid_legacy_translation_cache_is_revalidated() -> None:
+    """第三轮：旧翻译缓存里的空结果必须被忽略并重译，不能被当成"已翻译"。"""
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.ads_api_token = "x"
+            cfg.ads_llm_api_key = "x"
+            _add_cached_ads_mail(cfg, 7001, _window_time(cfg), status=None,
+                                 with_digest=False)
+            bc = "2024ApJ...963..100A"
+            cfg.llm_cache_file.write_text(json.dumps({bc: {
+                "bibcode": bc, "zh_title": "", "zh_abstract": "",
+                "note": "", "grade": "背景延伸"}}), encoding="utf-8")
+            _FakeLLM.calls = 0
+            pa, pl = _patch_ads_and_llm()
+            with pa, pl:
+                _run_ads(cfg)
+            from mail_digest.processors.ads.manifest import load_manifest
+            item = load_manifest(cfg)["items"]["INBOX:1:7001"]
+            assert _FakeLLM.calls > 0, "坏缓存被直接采用，没有重新翻译"
+            assert item["status"] == "ready", item
+            fixed = json.loads(cfg.llm_cache_file.read_text(encoding="utf-8"))[bc]
+            assert fixed["zh_title"], "重新翻译后没有修好缓存"
+            zh = cfg.zh_digest_dir / item["zh_file"]
+            assert "中文题目" in zh.read_text(encoding="utf-8")
+        finally:
+            _cleanup_env()
+
+
+def test_dry_run_writes_no_files_at_all() -> None:
+    """第三轮：state-init --dry-run 在旧记录待迁移时也不得写任何文件。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td, fetched=False)
+            _add_cached_ads_mail(cfg, 8001, _window_time(cfg), status=None,
+                                 with_digest=False)
+            cfg.processed_file.write_text("[8001]", encoding="utf-8")
+
+            def snapshot():
+                return {str(p.relative_to(cfg.data_dir)): p.read_bytes()
+                        for p in cfg.data_dir.rglob("*") if p.is_file()}
+
+            before = snapshot()
+            r = _run_cli(["ads", "state-init", "--last-official",
+                          "2026-09-11 09:00:00+08:00", "--dry-run"], td)
+            assert r.returncode == 0, r.stderr
+            after = snapshot()
+            assert before == after, sorted(set(after) - set(before))
+            assert not cfg.ads_manifest_file.exists(), "预览触发了迁移写盘"
+            assert not (cfg.data_dir / "processed.json.legacy.bak").exists()
+            assert "不会写入任何文件" in r.stdout
+        finally:
+            _cleanup_env()
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -1551,6 +1611,8 @@ if __name__ == "__main__":
     test_backup_failure_aborts_forced_reinit()
     test_empty_llm_object_is_not_ready()
     test_empty_status_not_reported_as_processing_failure()
+    test_invalid_legacy_translation_cache_is_revalidated()
+    test_dry_run_writes_no_files_at_all()
     test_fetch_takes_all_not_only_last_50()
     test_fetch_gap_is_retried_until_success()
     test_uidvalidity_change_resets_cursor_and_identity()

@@ -134,8 +134,13 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
                     bc = art.bibcode
                     hit = zh_cache.get(bc)
                     if hit:
-                        zh_map[bc] = hit
-                        continue
+                        if _zh_result_usable(hit):
+                            zh_map[bc] = hit
+                            continue
+                        # 历史缓存里的空结果（早期版本写入过）同样不可信：
+                        # 直接采用会让"没内容"的条目一路走到 ready 并正式发送。
+                        print(f"      ⚠️ 旧翻译缓存不完整 [{bc}]：忽略并重新翻译")
+                        zh_cache.pop(bc, None)
                     try:
                         msgs = build_article_messages(PROFILE_SUMMARY, art)
                         raw = llm.complete_json(msgs)
