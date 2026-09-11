@@ -584,6 +584,36 @@ def test_grants_push_empty_sends_status() -> None:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
 
+
+def test_ads_push_cross_day_digest() -> None:
+    """跨天场景：简报日期是昨天（未推送过）→ 默认推送必须发送并记录；重复推送不再发。"""
+    import os
+    import tempfile
+    from datetime import date, timedelta
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.imap_user = "me@test.edu.cn"
+            cfg.zh_digest_dir.mkdir(parents=True)
+            yday = date.today() - timedelta(days=1)
+            (cfg.zh_digest_dir / f"ads_{yday:%Y%m%d}_000001.zh.md").write_text(
+                "# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）\n"
+                "\n### 1. Title\n- 链接：https://ui.adsabs.harvard.edu/abs/X/abstract\n",
+                encoding="utf-8")
+            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
+                assert delivery.push(cfg) is True          # 跨天简报应发出
+                m.assert_called_once()
+                assert delivery.push(cfg) is False         # 已推送过 → 无新内容
+            assert f"{yday:%Y%m%d}" in cfg.ads_pushed_file.read_text(encoding="utf-8")
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -608,6 +638,7 @@ if __name__ == "__main__":
     test_ads_push_sends_via_smtp()
     test_ads_push_empty_sends_status()
     test_grants_push_empty_sends_status()
+    test_ads_push_cross_day_digest()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()

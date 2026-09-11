@@ -108,12 +108,26 @@ class Config:
     llm_cache_file: Path = PROJECT_ROOT / "data" / "llm_cache.json"        # ADS 翻译缓存
     grants_processed_file: Path = PROJECT_ROOT / "data" / "processed_fund.json"  # 基金状态
     grants_cache_file: Path = PROJECT_ROOT / "data" / "fund_cache.json"
-    llm_usage_log_file: Path = PROJECT_ROOT / "data" / "llm_usage.log"    # 基金提取缓存
+    llm_usage_log_file: Path = PROJECT_ROOT / "data" / "llm_usage.log"
+    ads_pushed_file: Path = PROJECT_ROOT / "data" / "ads_pushed.json"    # 基金提取缓存
 
     # ---- 行为 ----
     default_recent: int = 50            # fetch 默认拉最近 N 封
     default_folder: str = "INBOX"
     default_ads_limit: int = 20         # ads 一次最多处理的邮件数
+
+    def apply_data_dir(self, data_dir: Path) -> None:
+        """把数据目录及其全部派生子路径一次性重算（新增字段必须加在这里）。"""
+        self.data_dir = data_dir
+        self.eml_dir = data_dir / "emails"
+        self.digest_dir = data_dir / "digests"
+        self.zh_digest_dir = data_dir / "digests" / "zh"
+        self.processed_file = data_dir / "processed.json"
+        self.llm_cache_file = data_dir / "llm_cache.json"
+        self.grants_processed_file = data_dir / "processed_fund.json"
+        self.grants_cache_file = data_dir / "fund_cache.json"
+        self.llm_usage_log_file = data_dir / "llm_usage.log"
+        self.ads_pushed_file = data_dir / "ads_pushed.json"
 
     # ---- 域级 LLM key 解析（前缀优先，回退公共 key）----
     def ads_llm_key(self) -> str:
@@ -138,14 +152,7 @@ class Config:
         # 数据目录：环境变量 MAIL_DIGEST_DATA_DIR 可覆盖（打包安装后无仓库 data 目录时必需）
         override = os.environ.get("MAIL_DIGEST_DATA_DIR") or env.get("MAIL_DIGEST_DATA_DIR")
         if override:
-            cfg.data_dir = Path(override).expanduser()
-            cfg.eml_dir = cfg.data_dir / "emails"
-            cfg.digest_dir = cfg.data_dir / "digests"
-            cfg.zh_digest_dir = cfg.data_dir / "digests" / "zh"
-            cfg.processed_file = cfg.data_dir / "processed.json"
-            cfg.llm_cache_file = cfg.data_dir / "llm_cache.json"
-            cfg.grants_processed_file = cfg.data_dir / "processed_fund.json"
-            cfg.grants_cache_file = cfg.data_dir / "fund_cache.json"
+            cfg.apply_data_dir(Path(override).expanduser())
         cfg.imap_host = env.get("IMAP_HOST", cfg.imap_host)
         try:
             cfg.imap_port = int(env.get("IMAP_PORT", cfg.imap_port))
