@@ -20,11 +20,11 @@ jobs:
           pip install -e ".[all]"
           pip install ruff
           python -m compileall -q mail_digest
-      - name: Lint (ruff: bug 类检查，抓未定义名/未用导入)
+      - name: "Lint (ruff: 抓未定义名/未用导入等 bug 类问题)"
         run: ruff check . --select F --exclude data
-      - name: Tests (含安全回归)
+      - name: "Tests (含安全回归)"
         run: python tests/test_local.py
-      - name: CLI smoke (有邮件内容的真实处理，无 || true)
+      - name: "CLI smoke (真实邮件内容端到端，无 || true 兜底)"
         run: |
           export MAIL_DIGEST_DATA_DIR="$(mktemp -d)"
           mkdir -p "$MAIL_DIGEST_DATA_DIR/emails"
