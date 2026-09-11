@@ -27,15 +27,23 @@ class LockBusyError(RuntimeError):
     """另一个同类任务正在运行。"""
 
 
+class StateBackupError(RuntimeError):
+    """备份写入失败：此时必须中止覆盖，不能继续破坏原状态。"""
+
+
 def write_json_atomic(path: Path, obj, *, backup: Path | None = None) -> None:
     """原子写入 JSON；backup 非空时先把现有内容复制一份。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     if backup is not None and path.exists():
+        # 备份是覆盖的前提条件：写不出备份就必须中止，绝不能"备份失败还照旧覆盖"。
         try:
             backup.parent.mkdir(parents=True, exist_ok=True)
             backup.write_bytes(path.read_bytes())
-        except OSError:
-            pass
+            with open(backup, "rb") as fh:
+                fh.read(1)                       # 确认可读回
+        except OSError as exc:
+            raise StateBackupError(
+                f"备份失败（{backup}）：{exc}\n原文件未做任何修改，已中止覆盖操作。") from exc
     tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
     data = json.dumps(obj, ensure_ascii=False, indent=2)
     try:
@@ -105,7 +113,20 @@ class FileLock:
             age = time.time() - self.path.stat().st_mtime
         except OSError:
             return False
-        return age > self.stale_after
+        if age <= self.stale_after:
+            return False
+        # 超时只是必要条件：还要确认持有者进程真的没了，否则会把长时间运行的任务顶掉
+        try:
+            pid = int(self.path.read_text(encoding="utf-8").split()[0])
+        except (OSError, ValueError, IndexError):
+            return True
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True                      # 进程已不存在 → 陈旧锁
+        except PermissionError:
+            return False                     # 存活但不属于当前用户 → 不能接管
+        return False
 
     def __exit__(self, *exc) -> None:
         if self._fd is not None:

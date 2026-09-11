@@ -542,14 +542,18 @@ def _window_time(cfg, minutes=5):
     return cfg.planned_cutoff() - timedelta(minutes=minutes)
 
 
-def _mark_fetched(cfg, when=None):
-    """写入一次拉取记录（真实 cron 顺序是 fetch → run → push）。"""
+def _mark_fetched(cfg, when=None, fetch_ok=True, gaps=None, uncovered=None):
+    """写入一次拉取记录（真实 cron 顺序是 fetch → run → push）。
+
+    fetch_ok/gaps/uncovered 可注入"检索失败 / 有缺口 / 接管未完成"等不完整情形。
+    """
     from datetime import datetime
     from mail_digest.core.imap_client import load_imap_state
     from mail_digest.core.state import write_json_atomic
     st = load_imap_state(cfg)
     st[cfg.default_folder] = {
-        "uidvalidity": 1, "last_uid": 0, "gaps": [], "uncovered_below": None,
+        "uidvalidity": 1, "last_uid": 0, "gaps": list(gaps or []),
+        "uncovered_below": uncovered, "last_fetch_ok": fetch_ok,
         "last_fetch_at": (when or datetime.now(cfg.tz())).isoformat(timespec="seconds"),
     }
     write_json_atomic(cfg.imap_state_file, st)
@@ -593,13 +597,15 @@ def _ads_raw_mail(uid, received_at, bibcode="2024ApJ...963..100A",
 
 
 def _add_cached_ads_mail(cfg, uid, received_at, uidvalidity=1, status="ready",
-                         with_digest=True, subject="myADS notification"):
+                         with_digest=True, subject="myADS notification",
+                         bibcode="2024ApJ...963..100A"):
     """把一封 ADS 邮件写进缓存（新命名 + 索引 + manifest + 简报），返回 source_id。"""
     from mail_digest.core.imap_client import eml_name, load_index, save_index
     from mail_digest.processors.ads.manifest import load_manifest, save_manifest, upsert
     tag = f"{received_at:%Y%m%d}"
     name = eml_name(tag, uid, uidvalidity)
-    (cfg.eml_dir / name).write_bytes(_ads_raw_mail(uid, received_at, subject=subject))
+    (cfg.eml_dir / name).write_bytes(_ads_raw_mail(uid, received_at, subject=subject,
+                                                   bibcode=bibcode))
     sid = f"INBOX:{uidvalidity}:{uid}"
     idx = load_index(cfg.eml_dir)
     idx["emails"][name] = {"source_id": sid, "folder": "INBOX", "uid": uid,
@@ -1002,7 +1008,7 @@ def test_fetch_takes_all_not_only_last_50() -> None:
     from mail_digest.core.imap_client import fetch_recent
     with tempfile.TemporaryDirectory() as td:
         try:
-            cfg = _ads_env(td)
+            cfg = _ads_env(td, fetched=False)
             cfg.imap_auth_code = "x"
             fake = _FakeIMAP()
             base = datetime.now(cfg.tz()) - timedelta(days=2)
@@ -1029,7 +1035,7 @@ def test_fetch_gap_is_retried_until_success() -> None:
     from mail_digest.core.imap_client import fetch_recent, load_imap_state
     with tempfile.TemporaryDirectory() as td:
         try:
-            cfg = _ads_env(td)
+            cfg = _ads_env(td, fetched=False)
             cfg.imap_auth_code = "x"
             fake = _FakeIMAP()
             base = datetime.now(cfg.tz()) - timedelta(hours=3)
@@ -1058,7 +1064,7 @@ def test_uidvalidity_change_resets_cursor_and_identity() -> None:
     from mail_digest.core.imap_client import fetch_recent, load_imap_state
     with tempfile.TemporaryDirectory() as td:
         try:
-            cfg = _ads_env(td)
+            cfg = _ads_env(td, fetched=False)
             cfg.imap_auth_code = "x"
             fake = _FakeIMAP()
             old = datetime.now(cfg.tz()) - timedelta(days=3)
@@ -1227,6 +1233,280 @@ def test_cli_state_init_requires_confirm_and_refuses_overwrite() -> None:
             _cleanup_env()
 
 
+
+
+# ---- 第二轮审查（de68d6b）9 项失败对应的回归 ----
+
+class _FakeADS:
+    """假 ADS API：返回完整元数据，供 run 层测试使用。"""
+    calls = 0
+
+    def __init__(self, *a, **k):
+        pass
+
+    def fetch_bibcode(self, bc, fields):
+        _FakeADS.calls += 1
+        return {"title": [f"Title of {bc}"], "abstract": "An abstract.",
+                "author": ["A. Author"], "citation_count": 3,
+                "doi": "10.1000/x", "pubdate": "2024-01"}
+
+
+class _FakeLLM:
+    """假 LLM：payload 可替换（用于注入空对象等异常返回）。"""
+    payload = {"zh_title": "中文题目", "zh_abstract": "中文摘要", "note": "点评", "grade": "核心相关"}
+    calls = 0
+
+    def __init__(self, *a, **k):
+        pass
+
+    def complete_json(self, msgs):
+        _FakeLLM.calls += 1
+        return dict(_FakeLLM.payload)
+
+
+def _patch_ads_and_llm():
+    from unittest import mock
+    return (mock.patch("mail_digest.processors.ads.ops.ADSClient", _FakeADS),
+            mock.patch("mail_digest.processors.ads.ops.DeepSeekClient", _FakeLLM))
+
+
+def _run_ads(cfg):
+    import argparse
+    from mail_digest.processors.ads import ops as adsops
+    adsops.cmd_ads_run(cfg, argparse.Namespace(force=False, limit=None))
+
+
+def test_partial_llm_failure_is_not_sent() -> None:
+    """审查 case 23：一封邮件里的部分文献翻译失败 → 不得正式发送，也不得登记已发送。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            recv = _window_time(cfg)
+            # manifest 记录该邮件为失败，但磁盘上留着"部分翻译"的中文简报
+            _add_cached_ads_mail(cfg, 3001, recv, status="retryable_error")
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
+                r = delivery.push_official(cfg)
+            assert r["sent"] is False, r
+            assert r["failed_pending"] == 1, r
+            st = delivery.load_state(cfg)
+            assert not st["items"], "部分失败的邮件被登记为正式已发送"
+            assert m.call_count == 1                    # 只发状态邮件，不发简报
+            body = m.call_args.args[3]
+            assert "处理失败待重试" in body
+        finally:
+            _cleanup_env()
+
+
+def test_legacy_failed_record_migrates_to_retryable() -> None:
+    """审查 case 24：旧 processed 记录不能因"磁盘有英文简报"就被当成处理成功。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            recv = _window_time(cfg)
+            _add_cached_ads_mail(cfg, 1, recv, with_digest=False, status=None)
+            cfg.processed_file.write_text("[1]", encoding="utf-8")
+            # 旧版本失败路径留下的英文简报（没有中文）
+            (cfg.digest_dir / f"ads_{recv:%Y%m%d}_000001.md").write_text(
+                "# ADS digest\n\n(error: LLM failed)\n", encoding="utf-8")
+            from mail_digest.processors.ads.manifest import done_source_ids, load_manifest
+            mf = load_manifest(cfg)
+            item = mf["items"].get("INBOX:1:1")
+            assert item is not None, mf
+            assert item["status"] == "retryable_error", item
+            assert "INBOX:1:1" not in done_source_ids(mf)
+            # 下次 ads run 必须真的重跑这封（而不是"全部已处理成功"）
+            cfg.ads_api_token = "x"
+            cfg.ads_llm_api_key = "x"
+            pa, pl = _patch_ads_and_llm()
+            with pa, pl:
+                _run_ads(cfg)
+            assert _FakeADS.calls > 0, "旧失败记录没有被重新处理"
+            assert load_manifest(cfg)["items"]["INBOX:1:1"]["status"] == "ready"
+        finally:
+            _cleanup_env()
+
+
+def test_same_uid_different_uidvalidity_keeps_both_digests() -> None:
+    """审查 case 25：同日期同 UID、不同 UIDVALIDITY 的两封邮件不能共用简报文件。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.ads_api_token = "x"
+            cfg.ads_llm_api_key = "x"
+            recv = _window_time(cfg)
+            _add_cached_ads_mail(cfg, 1, recv, uidvalidity=1, status=None,
+                                 bibcode="2024ApJ...963..100A")
+            _add_cached_ads_mail(cfg, 1, recv, uidvalidity=2, status=None,
+                                 bibcode="2023MNRAS.520.1001A")
+            pa, pl = _patch_ads_and_llm()
+            with pa, pl:
+                _run_ads(cfg)
+            tag = f"{recv:%Y%m%d}"
+            f1 = cfg.digest_dir / f"ads_{tag}_000001_u1.md"
+            f2 = cfg.digest_dir / f"ads_{tag}_000001_u2.md"
+            assert f1.exists() and f2.exists(), sorted(p.name for p in cfg.digest_dir.glob("*.md"))
+            assert f1.read_bytes() != f2.read_bytes(), "两封邮件内容相同或被覆盖"
+            assert "2024ApJ...963..100A" in f1.read_text(encoding="utf-8")
+            assert "2023MNRAS.520.1001A" in f2.read_text(encoding="utf-8")
+        finally:
+            _cleanup_env()
+
+
+def test_search_failure_is_reported_not_treated_as_empty() -> None:
+    """审查 case 26：IMAP SEARCH 返回 NO 必须报错，且不能留下"成功检查"证据。"""
+    import tempfile
+    from mail_digest.core.imap_client import fetch_recent, load_imap_state
+
+    class _SearchFailIMAP(_FakeIMAP):
+        def uid(self, cmd, *args):
+            if cmd == "search":
+                return "NO", [None]
+            return super().uid(cmd, *args)
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td, fetched=False)      # 不预置拉取记录，验证失败不留证据
+            cfg.imap_auth_code = "x"
+            with _patch_imap(_SearchFailIMAP()):
+                try:
+                    fetch_recent(cfg)
+                    raise AssertionError("SEARCH 失败必须抛出异常")
+                except RuntimeError as exc:
+                    assert "检索" in str(exc), exc
+            st = load_imap_state(cfg).get("INBOX") or {}
+            assert st.get("last_fetch_ok") is False, st
+            assert not st.get("last_fetch_at"), "检索失败却写入了成功拉取时间"
+        finally:
+            _cleanup_env()
+
+
+def test_unresolved_gap_never_claims_no_new_mail() -> None:
+    """审查 case 27：仍有拉取缺口时，状态邮件不得声称"今日无新推送"。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _mark_fetched(cfg, fetch_ok=False, gaps=[1])
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
+                r = delivery.push_official(cfg)
+            assert r["sent"] is False
+            subject = r["status_mail"]
+            assert "无新推送" not in subject, subject
+            body = m.call_args.args[3]
+            assert "拉取失败" in body or "重试队列" in body, body[:400]
+        finally:
+            _cleanup_env()
+
+
+def test_recent_limited_handover_is_backfilled_later() -> None:
+    """审查 case 30：--recent 只接管一部分时，去掉参数后的 fetch 必须补齐更早邮件。"""
+    import tempfile
+    from datetime import datetime, timedelta
+    from mail_digest.core.imap_client import fetch_recent, load_imap_state
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td, fetched=False)
+            cfg.imap_auth_code = "x"
+            fake = _FakeIMAP()
+            base = datetime.now(cfg.tz()) - timedelta(days=1)
+            for uid in (1, 2, 3, 4):
+                _put_mail(fake, uid, base + timedelta(minutes=uid), ads=(uid == 1))
+            with _patch_imap(fake):
+                first = fetch_recent(cfg, recent=2)
+            assert sorted(m.uid for m in first) == [3, 4], [m.uid for m in first]
+            st = load_imap_state(cfg)["INBOX"]
+            assert st["uncovered_below"] == 2, st
+            with _patch_imap(fake):
+                second = fetch_recent(cfg)
+            assert sorted(m.uid for m in second) == [1, 2], [m.uid for m in second]
+            assert load_imap_state(cfg)["INBOX"]["uncovered_below"] is None
+        finally:
+            _cleanup_env()
+
+
+def test_backup_failure_aborts_forced_reinit() -> None:
+    """审查 case 31：备份写失败必须中止覆盖，且不能声称"已备份"。"""
+    import json
+    import tempfile
+    from pathlib import Path as _P
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 4001, _window_time(cfg))
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
+                delivery.push_official(cfg)
+            before = json.loads(cfg.ads_state_file.read_text(encoding="utf-8"))
+            assert before["items"]
+            original = _P.write_bytes
+
+            def _failing_backup(self, data):
+                if ".bak." in self.name:
+                    raise OSError("injected backup failure")
+                return original(self, data)
+
+            with mock.patch.object(_P, "write_bytes", _failing_backup):
+                try:
+                    delivery.state_init(cfg, "2026-09-11 09:00:00+08:00", force=True)
+                    raise AssertionError("备份失败必须中止覆盖")
+                except ValueError as exc:
+                    assert "备份失败" in str(exc), exc
+            assert json.loads(cfg.ads_state_file.read_text(encoding="utf-8")) == before, \
+                "备份失败却仍然覆盖了原状态"
+        finally:
+            _cleanup_env()
+
+
+def test_empty_llm_object_is_not_ready() -> None:
+    """审查 case 33：LLM 返回合法但空的 JSON 不能算处理成功。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.ads_api_token = "x"
+            cfg.ads_llm_api_key = "x"
+            _add_cached_ads_mail(cfg, 5001, _window_time(cfg), status=None,
+                                 with_digest=False)
+            from mail_digest.processors.ads.manifest import load_manifest
+            _FakeLLM.payload = {}
+            try:
+                pa, pl = _patch_ads_and_llm()
+                with pa, pl:
+                    _run_ads(cfg)
+            finally:
+                _FakeLLM.payload = {"zh_title": "中文题目", "zh_abstract": "中文摘要",
+                                    "note": "点评", "grade": "核心相关"}
+            item = load_manifest(cfg)["items"]["INBOX:1:5001"]
+            assert item["status"] == "retryable_error", item
+            assert item["errors"], item
+        finally:
+            _cleanup_env()
+
+
+def test_empty_status_not_reported_as_processing_failure() -> None:
+    """审查 case 32：零文献（empty）的邮件不能被报成"处理失败"。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 6001, _window_time(cfg), status="empty",
+                                 with_digest=False)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
+                r = delivery.push_official(cfg)
+            assert r["sent"] is False
+            assert r["failed_pending"] == 0, r
+            assert "无新推送" in r["status_mail"], r["status_mail"]
+        finally:
+            _cleanup_env()
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -1262,6 +1542,15 @@ if __name__ == "__main__":
     test_uidvalidity_reuse_processes_new_mail()
     test_missing_date_header_digest_is_pushable()
     test_status_mail_reports_failures_and_fetch_evidence()
+    test_partial_llm_failure_is_not_sent()
+    test_legacy_failed_record_migrates_to_retryable()
+    test_same_uid_different_uidvalidity_keeps_both_digests()
+    test_search_failure_is_reported_not_treated_as_empty()
+    test_unresolved_gap_never_claims_no_new_mail()
+    test_recent_limited_handover_is_backfilled_later()
+    test_backup_failure_aborts_forced_reinit()
+    test_empty_llm_object_is_not_ready()
+    test_empty_status_not_reported_as_processing_failure()
     test_fetch_takes_all_not_only_last_50()
     test_fetch_gap_is_retried_until_success()
     test_uidvalidity_change_resets_cursor_and_identity()

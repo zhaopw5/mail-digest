@@ -60,6 +60,8 @@ def main() -> None:
     a_push.add_argument("--cutoff", default=None,
                         help="仅供测试/补跑：显式指定本次正式推送的截止点")
     si = ads_sub.add_parser("state-init", help="初始化正式推送状态（旧版本迁移）")
+    si.add_argument("--dry-run", action="store_true",
+                    help="只预览将标记/保留哪些简报，不写任何文件")
     si.add_argument("--confirm", action="store_true",
                     help="与 --mark-existing-sent 连用，确认执行不可逆的「标记已发送」")
     si.add_argument("--force", action="store_true", help="覆盖已存在的状态文件（会先备份）")

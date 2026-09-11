@@ -114,10 +114,9 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
         errors: list[str] = [f"{art.bibcode}: {art.error}"
                              for _n, arts in grouped for art in arts if art.error]
 
-        date_tag = f"{m.date:%Y%m%d}" if m.date else "nodate"
         digest = build_ads_digest(m, grouped)
         cfg.digest_dir.mkdir(parents=True, exist_ok=True)
-        out = cfg.digest_dir / f"ads_{date_tag}_{m.uid:06d}.md"
+        out, zh_out = digest_paths(cfg, m)
         out.write_text(digest, encoding="utf-8")
         print(f"     📄 英文简报已生成：{out}")
 
@@ -127,7 +126,10 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
             zh_map: dict[str, dict] = {}
             for _name, arts in grouped:
                 for art in arts:
-                    if art.error or not art.title:
+                    if art.error:
+                        continue                     # 已在 errors 里按 API 失败记账
+                    if not art.title:
+                        missing_zh.append(f"{art.bibcode}: ADS 元数据缺少标题")
                         continue
                     bc = art.bibcode
                     hit = zh_cache.get(bc)
@@ -142,13 +144,18 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
                         missing_zh.append(f"{bc}: {exc}")
                         print(f"      ⚠️ LLM 失败 [{bc}]：{exc}（下次运行会重试这一封）")
                         continue
+                    if not _zh_result_usable(res):
+                        # 不写缓存：坏结果不能被下次运行当成"已翻译"复用
+                        missing_zh.append(f"{bc}: LLM 返回内容缺少标题或摘要")
+                        print(f"      ⚠️ LLM 返回内容不完整 [{bc}]（下次运行会重试这一封）")
+                        continue
                     zh_cache[bc] = res
                     zh_map[bc] = res
                     zh_cache_dirty = True
             if zh_map:
                 zh_doc = build_ads_digest_zh(m, grouped, zh_map)
                 cfg.zh_digest_dir.mkdir(parents=True, exist_ok=True)
-                zout = cfg.zh_digest_dir / f"ads_{date_tag}_{m.uid:06d}.zh.md"
+                zout = zh_out
                 zout.write_text(zh_doc, encoding="utf-8")
                 zh_file = zout.name
                 print(f"     📄 中文简报已生成：{zout}")
@@ -174,6 +181,30 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
     if n_failed:
         summary += f"，失败待重试 {n_failed} 封（下次运行自动重试）"
     print(summary)
+
+
+def digest_paths(cfg, mail) -> tuple:
+    """简报产物路径（英文, 中文）。
+
+    文件名带完整身份 ``_u<UIDVALIDITY>``：同一天、同一 UID、不同 UIDVALIDITY 的
+    两封邮件若共用文件名，后处理的会直接覆盖前者的内容，正式邮件就会缺文献。
+    """
+    tag = f"{mail.date:%Y%m%d}" if mail.date else "nodate"
+    ident = f"_u{mail.uidvalidity if mail.uidvalidity is not None else 0}"
+    return (cfg.digest_dir / f"ads_{tag}_{mail.uid:06d}{ident}.md",
+            cfg.zh_digest_dir / f"ads_{tag}_{mail.uid:06d}{ident}.zh.md")
+
+
+def _zh_result_usable(res: dict) -> bool:
+    """LLM 结果是否算完整：标题与至少一项正文内容都不能为空。
+
+    只看"没有抛异常"是不够的——模型返回合法 JSON `{}` 时字段会被归一化成空串，
+    若当成成功，正式推送里就会出现没有标题、没有摘要的空条目。
+    """
+    if not str(res.get("zh_title") or "").strip():
+        return False
+    return any(str(res.get(k) or "").strip()
+               for k in ("zh_abstract", "note"))
 
 
 def _iso(dt) -> str | None:
@@ -240,7 +271,8 @@ def cmd_ads_state_init(cfg: Config, args: argparse.Namespace) -> None:
         msg = state_init(cfg, args.last_official,
                          mark_existing_sent=getattr(args, "mark_existing_sent", False),
                          confirm=getattr(args, "confirm", False),
-                         force=getattr(args, "force", False))
+                         force=getattr(args, "force", False),
+                         dry_run=getattr(args, "dry_run", False))
     except (ValueError, StateCorruptError) as exc:
         sys.exit(str(exc))
     print("✅ " + msg)

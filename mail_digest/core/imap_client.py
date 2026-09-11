@@ -102,9 +102,15 @@ def load_index(eml_dir: Path) -> dict:
     try:
         raw = load_json_strict(f, {})
     except StateCorruptError:
-        # 索引损坏只影响缓存元数据（会影响收到的判定），保守做法是当作空并重建，
-        # 但要显式告知，不能静默。
-        print(f"⚠️  邮件索引损坏，将按文件名重建：{f}")
+        # 索引损坏时按文件名重建（新命名自带完整身份，因此重建不会造成错误推送），
+        # 但必须显式告知并留下现场备份，不能静默丢弃。
+        backup = f.with_name(f.name + ".corrupt.bak")
+        try:
+            if not backup.exists():
+                backup.write_bytes(f.read_bytes())
+        except OSError:
+            pass
+        print(f"⚠️  邮件索引损坏，已备份为 {backup.name} 并按文件名重建：{f}")
         raw = {}
     if not isinstance(raw, dict):
         return {"emails": {}}
@@ -324,7 +330,10 @@ def fetch_recent(cfg, recent: int | None = None, folder: str | None = None,
             # IMAP 序列集语义：* 在 "UID n:*" 中表示最大 UID，n 已最大时会返回该封，
             # 因此必须显式过滤掉 <= last_uid 的结果。
             typ, data = conn.uid("search", None, f"UID {last_uid + 1}:*")
-            new_uids = {int(x) for x in (data[0].split() if (typ == "OK" and data and data[0]) else [])}
+            if typ != "OK":
+                raise RuntimeError(f"IMAP 增量检索失败（UID {last_uid + 1}:* 返回 {typ}）："
+                                   "本次未检查邮箱，不能记为成功拉取")
+            new_uids = {int(x) for x in (data[0].split() if (data and data[0]) else [])}
             new_uids = {u for u in new_uids if u > last_uid}
             counters["incremental"] = len(new_uids)
             target |= new_uids
@@ -333,17 +342,20 @@ def fetch_recent(cfg, recent: int | None = None, folder: str | None = None,
         #     分批推进，保证「更早的邮件」最终一定会被纳入，而不是被永久跳过。
         if last_uid is None or uncovered_below is not None:
             typ, data = conn.uid("search", None, "ALL")
-            all_uids = sorted(int(x) for x in
-                              (data[0].split() if (typ == "OK" and data and data[0]) else []))
+            if typ != "OK":
+                raise RuntimeError(f"IMAP 检索失败（SEARCH ALL 返回 {typ}）："
+                                   "本次未检查邮箱，不能记为成功拉取")
+            all_uids = sorted(int(x) for x in (data[0].split() if (data and data[0]) else []))
             if all_uids:
                 if recent and last_uid is None:
-                    # 用户显式限定只接管最近 N 封：不做后续自动补拉，但必须说清楚
                     window = all_uids[-recent:]
                     target |= set(window)
                     counters["initial"] = len(window)
                     if len(all_uids) > len(window):
+                        # 保留未覆盖范围：下次不带 --recent 的 fetch 会自动继续补拉
+                        uncovered_below = all_uids[-recent - 1]
                         print(f"⚠️  指定了 --recent {recent}：更早的 {len(all_uids) - len(window)} 封"
-                              "本次未纳入，且不会自动补拉（想全量接管请去掉 --recent）")
+                              "本次未纳入，将在后续 fetch（不带 --recent）中自动分批补拉")
                 else:
                     pending = [u for u in all_uids
                                if uncovered_below is None or u <= int(uncovered_below)]
@@ -429,12 +441,14 @@ def fetch_recent(cfg, recent: int | None = None, folder: str | None = None,
             if moved:
                 print(f"ℹ️  已隔离 {moved} 个旧缓存文件 → {eml_dir / '_legacy_unidentified'}"
                       "（身份已由新的带 UIDVALIDITY 文件取代；确认无误后可自行删除该目录）")
+        complete = not remaining_gaps and uncovered_below is None
         imap_state[folder] = {
             "uidvalidity": validity,
             "last_uid": progressed,
             "uncovered_below": uncovered_below,
             "gaps": remaining_gaps,
             "last_fetch_at": _now_iso(cfg),
+            "last_fetch_ok": complete,        # 只有完整成功才允许断言「邮箱没有新邮件」
             "last_fetch_counts": counters,
         }
         save_index(eml_dir, index)
@@ -442,6 +456,19 @@ def fetch_recent(cfg, recent: int | None = None, folder: str | None = None,
         if remaining_gaps:
             print(f"⚠️  仍有 {len(remaining_gaps)} 封邮件待重试（UID {remaining_gaps[:10]}"
                   f"{'…' if len(remaining_gaps) > 10 else ''}），下次 fetch 自动重试")
+    except Exception as exc:
+        # 检索/拉取过程本身失败：明确记为「本次没有成功检查邮箱」，
+        # 不更新时间戳（否则推送阶段会把"没检查"当成"没有新邮件"）。
+        rec_fail = dict(rec) if isinstance(rec, dict) else {}
+        rec_fail.update({"last_fetch_ok": False, "last_fetch_error": str(exc)[:300]})
+        if validity is not None:
+            rec_fail["uidvalidity"] = validity
+        imap_state[folder] = rec_fail
+        try:
+            write_json_atomic(cfg.imap_state_file, imap_state)
+        except OSError:
+            pass
+        raise
     finally:
         conn.logout()
     return mails

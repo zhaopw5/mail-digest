@@ -39,9 +39,10 @@ def load_manifest(cfg) -> dict:
             save_manifest(cfg, mf)
         return mf
     if not isinstance(raw, dict) or raw.get("schema_version") != SCHEMA_VERSION:
-        mf = {"schema_version": SCHEMA_VERSION, "items": {}}
-        bootstrap_from_legacy(cfg, mf)
-        return mf
+        raise StateCorruptError(
+            f"ADS 处理状态文件格式无法识别（schema_version={raw.get('schema_version') if isinstance(raw, dict) else type(raw).__name__}）："
+            f"{path}。为避免把未知格式当成空状态（会重复处理或漏推），已中止；"
+            "请人工确认该文件后删除或改名，再运行 ads run 重建。")
     raw.setdefault("items", {})
     return raw
 
@@ -70,9 +71,12 @@ def failed_source_ids(mf: dict) -> set[str]:
 def bootstrap_from_legacy(cfg, mf: dict) -> int:
     """一次性迁移：旧的 processed.json（裸 UID）→ manifest（完整 source_id）。
 
-    只有能同时证明「该邮件在本地有完整身份」且「对应简报文件确实存在」的条目
-    才会被认定为 ready；证不出来的条目**不标记**，留给下一次 ``ads run`` 重跑
-    （宁可重跑一次，也不要把暂时失败当成已完成）。
+    **旧记录一律迁移为 retryable_error，不认定为 ready。** 原因：旧版本在处理
+    失败时也会写出英文简报，因此"磁盘上有文件"根本不能证明当时处理完整；把它当
+    成功就会让历史故障永远跳过。这些邮件会在下次 ``ads run`` 重新处理（LLM 有缓存，
+    重跑成本可控），处理完整后才转为 ready。
+
+    旧 processed.json 会先备份为 ``processed.json.legacy.bak``，便于人工核对。
     """
     from ...core.imap_client import load_index, parse_eml_name
     from ...core.ops import _load_processed
@@ -123,21 +127,25 @@ def bootstrap_from_legacy(cfg, mf: dict) -> int:
             zh_hits = sorted(cfg.zh_digest_dir.glob(f"ads_*_{uid:06d}.zh.md"))
             if zh_hits:
                 zh = zh_hits[-1].name
-        if not en and not zh:
-            continue                        # 没有简报 → 属于失败，留给重跑
         mf["items"][sid] = {
-            "status": "ready",
+            "status": "retryable_error",
             "received_at": rec.get("received_at"),
             "en_file": en,
             "zh_file": zh,
-            "errors": [],
+            "errors": ["旧版本状态无法证明处理完整（失败时也会生成英文简报），已安排重新处理"],
             "migrated_from": "processed.json",
             "updated_at": datetime.now(cfg.tz()).isoformat(timespec="seconds"),
         }
         n += 1
     if n:
-        print(f"ℹ️  已从旧的 processed.json 迁移 {n} 封邮件的处理状态到 ads_manifest.json"
-              "（仅迁移能证明简报确实存在的条目）")
+        try:
+            bak = cfg.processed_file.with_name("processed.json.legacy.bak")
+            if cfg.processed_file.exists() and not bak.exists():
+                bak.write_bytes(cfg.processed_file.read_bytes())
+        except OSError as exc:
+            print(f"⚠️  旧 processed.json 备份失败（{exc}）：迁移继续，但请自行留存该文件")
+        print(f"ℹ️  已把旧 processed.json 中的 {n} 封邮件迁移为「待重试」"
+              "（不再以文件存在认定成功）；下次 ads run 会重新处理并核对完整性")
     return n
 
 

@@ -28,7 +28,8 @@ from datetime import date, datetime
 from ...core.html import _CSS, md_to_html
 from ...core.imap_client import load_index, load_imap_state, load_mails_from_dir
 from ...core.push import send_html
-from ...core.state import FileLock, LockBusyError, StateCorruptError, load_json_strict, write_json_atomic
+from ...core.state import (FileLock, LockBusyError, StateBackupError, StateCorruptError,
+                           load_json_strict, write_json_atomic)
 from .manifest import failed_source_ids, load_manifest
 from .overview import _body_after_header
 from .parser import is_ads_email
@@ -118,16 +119,21 @@ def _fallback_candidates(cfg) -> list[dict]:
             by_uid.setdefault(int(rec["uid"]), []).append(rec)
     out: list[dict] = []
     for f in sorted(cfg.zh_digest_dir.glob("ads_*.zh.md")):
-        m = re.search(r"ads_(?:(\d{8})|nodate)_(\d+)\.zh\.md$", f.name)
+        m = re.search(r"ads_(?:(\d{8})|nodate)_(\d+)(?:_u(\d+))?\.zh\.md$", f.name)
         if not m:
             continue
         uid = int(m.group(2))
-        recs = by_uid.get(uid) or []
-        if len(recs) != 1:
-            print(f"⚠️  简报 {f.name} 无法唯一确定来源邮件（UID {uid} 命中 {len(recs)} 条索引），"
+        uv = int(m.group(3)) if m.group(3) else None
+        if uv is not None:
+            # 新命名自带完整身份，无需查索引
+            matches = [r for r in (by_uid.get(uid) or []) if r.get("uidvalidity") == uv]
+        else:
+            matches = by_uid.get(uid) or []
+        if len(matches) != 1:
+            print(f"⚠️  简报 {f.name} 无法唯一确定来源邮件（UID {uid} 命中 {len(matches)} 条索引），"
                   "已跳过；请重新运行 ads run 以建立 ads_manifest.json")
             continue
-        rec = recs[0]
+        rec = matches[0]
         out.append({"source_id": rec.get("source_id"), "file": f, "en_file": None,
                     "received_at": _parse_iso(rec.get("received_at"), cfg)})
     return out
@@ -144,6 +150,7 @@ def digest_candidates(cfg) -> list[dict]:
                if rec.get("source_id")}
     out: list[dict] = []
     mf = load_manifest(cfg)
+    manifest_present = cfg.ads_manifest_file.exists()
     for sid, it in mf.get("items", {}).items():
         if it.get("status") != "ready":
             continue
@@ -165,7 +172,11 @@ def digest_candidates(cfg) -> list[dict]:
             except Exception:
                 recv = None
         out.append({"source_id": sid, "file": f, "en_file": en, "received_at": recv})
-    if not out:
+    if not out and not manifest_present:
+        # 只有在完全没有 manifest（老部署、纯手工放简报）时才允许退回扫描磁盘文件。
+        # manifest 一旦存在，它就是唯一权威：某封邮件处于 retryable_error 时，
+        # 磁盘上可能留有"部分翻译"的简报，退回扫描会把它当成功发出去并登记 official_sent。
+        print("⚠️  未找到 ads_manifest.json，按磁盘简报文件推断候选（建议先运行 ads run 建立处理状态）")
         out = _fallback_candidates(cfg)
     return out
 
@@ -187,10 +198,16 @@ def ads_mail_sources(cfg) -> dict | None:
 
 
 def fetch_evidence(cfg) -> dict:
-    """最近一次拉取记录（用于判断「没有新推送」是否有依据）。"""
+    """最近一次拉取记录（用于判断「没有新推送」是否有依据）。
+
+    只有「检索成功 + 无拉取缺口 + 首次接管已覆盖完整 + 时间戳晚于本次截止点」
+    四条同时成立，才允许断言邮箱里没有新邮件。
+    """
     rec = (load_imap_state(cfg).get(cfg.default_folder) or {})
     return {"last_fetch_at": _parse_iso(rec.get("last_fetch_at"), cfg),
             "uidvalidity": rec.get("uidvalidity"),
+            "last_fetch_ok": rec.get("last_fetch_ok"),
+            "last_fetch_error": rec.get("last_fetch_error"),
             "gaps": rec.get("gaps") or [],
             "uncovered_below": rec.get("uncovered_below")}
 
@@ -211,6 +228,7 @@ def select_official(cfg, state: dict, cutoff: datetime):
                and c["source_id"] not in sent_ids]
     known_ids = {c["source_id"] for c in cands}
     mf = load_manifest(cfg)
+    tracked = set(mf.get("items", {}))       # manifest 已登记的（ready/empty/retryable）
     failed = set()
     for sid in failed_source_ids(mf):
         if sid in sent_ids or sid in known_ids:
@@ -223,7 +241,7 @@ def select_official(cfg, state: dict, cutoff: datetime):
     unknown = sources is None
     if sources:
         for sid, recv in sources.items():
-            if sid in sent_ids or sid in known_ids:
+            if sid in sent_ids or sid in known_ids or sid in tracked:
                 continue
             r = _aware(recv, cfg)
             if r is None or r <= cutoff:
@@ -297,8 +315,11 @@ def _situation_notes(cfg, cutoff, n_sent: int, failed: set, unknown: bool,
                  "最近一次拉取邮箱：无记录（无法确认邮箱是否还有新邮件）")
     if unknown:
         notes.append("⚠️ 本地邮件缓存读取失败：无法断言邮箱里是否还有未处理的 ADS 邮件。")
+    if evidence.get("last_fetch_error"):
+        notes.append(f"⚠️ 最近一次拉取邮箱失败：{evidence['last_fetch_error']}")
     if evidence.get("gaps"):
-        notes.append(f"⚠️ 有 {len(evidence['gaps'])} 封邮件上次拉取失败，仍在待重试队列。")
+        notes.append(f"⚠️ 有 {len(evidence['gaps'])} 封邮件上次拉取失败，仍在待重试队列"
+                     f"（UID {evidence['gaps'][:10]}），下次 fetch 会重试。")
     if evidence.get("uncovered_below"):
         notes.append("⚠️ 首次接管邮箱尚未完成：更早的邮件将分批补拉，暂未纳入统计。")
     return notes
@@ -343,19 +364,35 @@ def _push_official_locked(cfg, cutoff: datetime | None) -> dict:
 
     # 本次没有可发送内容：发送状态邮件，如实说明检查范围
     lf = evidence.get("last_fetch_at")
-    # 「没有新推送」只有在截止点之后确实拉取过邮箱时才成立（cron 顺序：all → push）
-    fetched_recently = bool(lf and lf >= cutoff)
+    gaps = evidence.get("gaps") or []
+    uncovered = evidence.get("uncovered_below")
+    # 「没有新推送」需要完整证据：检索成功、无缺口、接管完整、且时间戳晚于截止点
+    fetch_ok = evidence.get("last_fetch_ok") is True
+    checked = bool(fetch_ok and lf and lf >= cutoff and not gaps and not uncovered)
     notes = _situation_notes(cfg, cutoff, 0, failed, unknown, evidence)
     if failed:
         subject = f"ADS 文献状态 {today:%Y-%m-%d}：发现新邮件但处理失败"
         head = (f"发现 <strong>{len(failed)}</strong> 封 ADS 邮件尚未处理成功"
                 "（可能原因：ADS API 临时不可用、LLM 失败，或本次 ads run 尚未跑完）。")
         tail = "这些邮件<strong>没有</strong>被标记为已处理，下次 `ads run` 会自动重试。"
-    elif unknown or not fetched_recently:
+    elif unknown or not lf or lf < cutoff:
         subject = f"ADS 文献状态 {today:%Y-%m-%d}：本次未检测到有效的邮件拉取记录"
-        head = ("本地已处理邮件中没有待推送内容，但<strong>没有</strong>截止点之后的拉取记录，"
+        head = ("本地已处理邮件中没有待推送内容，但<strong>没有</strong>截止点之后的成功拉取记录，"
                 "因此不能确认邮箱里没有新邮件。")
-        tail = "请确认 cron 中 `fetch`（`mail-digest all` 已包含）在 push 之前成功执行。"
+        tail = ("请确认 cron 中 `fetch`（`mail-digest all` 已包含）在 push 之前成功执行；"
+                "若上一轮失败的邮件仍在重试队列，也会在这里如实显示。")
+    elif not checked:
+        subject = f"ADS 文献状态 {today:%Y-%m-%d}：本次未能完整确认邮箱"
+        reasons = []
+        if gaps:
+            reasons.append(f"有 {len(gaps)} 封邮件拉取失败仍在重试队列")
+        if uncovered:
+            reasons.append("首次接管尚未覆盖到更早的邮件（正在分批补拉）")
+        if not fetch_ok:
+            reasons.append(f"最近一次拉取未成功（{evidence.get('last_fetch_error') or '原因未知'}）")
+        head = ("已处理邮件中没有待推送内容，但本轮<strong>没有完整检查到邮箱</strong>："
+                + "；".join(reasons) + "。因此不能断言没有新邮件。")
+        tail = "下次 fetch 会自动重试缺口；补齐后本次未覆盖的邮件仍会正常推送（不会漏）。"
     else:
         subject = f"ADS 文献状态 {today:%Y-%m-%d}：今日无新推送"
         head = ("截止点之前没有收到新的 myADS 文献推送（已核对本地邮件缓存与处理状态），"
@@ -411,7 +448,8 @@ def preview(cfg, when: date | None = None) -> str:
 
 
 def state_init(cfg, last_official: str, mark_existing_sent: bool = False,
-               confirm: bool = False, force: bool = False) -> str:
+               confirm: bool = False, force: bool = False,
+               dry_run: bool = False) -> str:
     """初始化/迁移正式推送状态（安全优先）。
 
     规则（对应审查 P1-4）：
@@ -433,13 +471,27 @@ def state_init(cfg, last_official: str, mark_existing_sent: bool = False,
             f"{prev.get('last_official_cutoff')}，已发送 {len(prev['items'])} 项）。\n"
             "state-init 会覆盖它，因此默认拒绝执行；确实要重建请加 --force（会先备份）。")
 
+    # 备份名带微秒，避免同秒内重复强制初始化时互相覆盖
     backup = cfg.ads_state_file.with_name(
-        f"ads_state.json.bak.{_now(cfg):%Y%m%d%H%M%S}") if exists else None
+        f"ads_state.json.bak.{_now(cfg):%Y%m%d%H%M%S%f}") if exists else None
     state = _fresh_state()
     state["last_official_cutoff"] = cutoff.isoformat(timespec="seconds")
 
     lines: list[str] = []
     n_marked = n_kept = 0
+    if dry_run:
+        # 只预览：列出将被标记/保留的邮件，不写任何文件
+        preview_lines: list[str] = []
+        for c in sorted(digest_candidates(cfg), key=lambda x: x.get("received_at") or cutoff):
+            recv = c.get("received_at")
+            if recv is not None and recv > cutoff:
+                preview_lines.append(f"  · 保留待发送（晚于截止点）：{c['source_id']} ← {c['file'].name}")
+            else:
+                preview_lines.append(f"  · 将标记已发送：{c['source_id']} ← {c['file'].name}")
+        return ("（dry-run）state-init 不会写入任何文件\n"
+                f"  · 截止点将设为：{cutoff.isoformat(timespec='seconds')}\n"
+                f"  · 现有状态：{'存在，执行时将先备份' if exists else '不存在'}\n"
+                f"  · 候选简报 {len(preview_lines)} 份：\n" + "\n".join(preview_lines))
     if mark_existing_sent:
         if not confirm:
             raise ValueError(
@@ -461,10 +513,16 @@ def state_init(cfg, last_official: str, mark_existing_sent: bool = False,
             }
             n_marked += 1
             when_txt = f"{recv:%Y-%m-%d %H:%M}" if recv else "收件时间未知"
-            lines.append(f"  · 标记已发送（收件 {when_txt}）："
-                         f"{c['source_id']} ← {c['file'].name}")
-    # 覆盖式初始化必须先落备份（带时间戳，不会被后续覆盖）
-    write_json_atomic(cfg.ads_state_file, state, backup=backup)
+            line = (f"  · 标记已发送（收件 {when_txt}）："
+                    f"{c['source_id']} ← {c['file'].name}")
+            lines.append(line)
+            print(line)                      # 先给人工看清单，再落盘
+    # 覆盖式初始化必须先落备份（带时间戳，不会被后续覆盖）；
+    # 备份失败会抛 StateBackupError 并中止，原状态保持不动。
+    try:
+        write_json_atomic(cfg.ads_state_file, state, backup=backup)
+    except StateBackupError as exc:
+        raise ValueError(str(exc)) from exc
     msg = [f"状态已初始化：last_official_cutoff={state['last_official_cutoff']}"]
     if backup:
         msg.append(f"原状态已备份：{backup.name}")

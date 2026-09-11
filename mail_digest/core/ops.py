@@ -22,7 +22,7 @@ def _load_json_obj(path: Path) -> dict:
 
 def _save_json_obj(path: Path, obj: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json_atomic(path, obj)          # 原子写：不留半截文件
 
 
 def _load_processed(path: Path) -> set:
