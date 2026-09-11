@@ -614,6 +614,39 @@ def test_ads_push_cross_day_digest() -> None:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
 
+
+def test_ads_push_merges_multiple_unpushed() -> None:
+    """窗口内多封推送（不同邮件日期）必须合并一封全部发出，不漏早期那封。"""
+    import os
+    import tempfile
+    from datetime import date, timedelta
+    from unittest import mock
+    from mail_digest.core.config import Config
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["MAIL_DIGEST_DATA_DIR"] = td
+        try:
+            cfg = Config.load()
+            cfg.imap_user = "me@test.edu.cn"
+            cfg.zh_digest_dir.mkdir(parents=True)
+            body = ("# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）\n"
+                    "\n### 1. Title\n")
+            for delta, uid in ((2, "000001"), (1, "000002")):
+                d = date.today() - timedelta(days=delta)
+                (cfg.zh_digest_dir / f"ads_{d:%Y%m%d}_{uid}.zh.md").write_text(body, encoding="utf-8")
+            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
+                assert delivery.push(cfg) is True
+                m.assert_called_once()                      # 合并为一封
+                subject = m.call_args.args[2]
+                assert "~" in subject, subject               # 主题含日期范围
+                assert delivery.push(cfg) is False           # 已全部推送 → 无新内容
+            pushed = cfg.ads_pushed_file.read_text(encoding="utf-8")
+            assert f"{(date.today() - timedelta(days=2)):%Y%m%d}" in pushed
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -639,6 +672,7 @@ if __name__ == "__main__":
     test_ads_push_empty_sends_status()
     test_grants_push_empty_sends_status()
     test_ads_push_cross_day_digest()
+    test_ads_push_merges_multiple_unpushed()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()

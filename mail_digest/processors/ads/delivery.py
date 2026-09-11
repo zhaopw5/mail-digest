@@ -49,18 +49,15 @@ def _save_pushed(cfg, pushed: dict) -> None:
         pass
 
 
-def _latest_digest_group(cfg) -> tuple[str, list[Path]]:
-    """按文件名日期分组，返回 (最新日期 YYYYMMDD, 该日期的全部简报文件)。"""
+def _digest_groups(cfg) -> dict[str, list[Path]]:
+    """按文件名日期（= 邮件日期）分组：{YYYYMMDD: [文件...]}。"""
     import re as _re
     groups: dict[str, list[Path]] = {}
     for f in cfg.zh_digest_dir.glob("ads_*.zh.md"):
         m = _re.search(r"ads_(\d{8})_", f.name)
         if m:
             groups.setdefault(m.group(1), []).append(f)
-    if not groups:
-        return "", []
-    latest = max(groups)
-    return latest, sorted(groups[latest])
+    return groups
 
 
 def push(cfg, when: date | None = None, max_age_days: int = 3) -> bool:
@@ -79,32 +76,43 @@ def push(cfg, when: date | None = None, max_age_days: int = 3) -> bool:
         files = collect_zh_for_date(cfg, when)
         if not files:
             return False
-        _send_digest(cfg, when, files)
+        _send_digest(cfg, [when], files)
         return True
 
-    latest, files = _latest_digest_group(cfg)
-    if not files or not latest:
+    # 推送「上次运行以来新处理、且尚未推送过」的全部简报——
+    # 覆盖跨天到达、以及窗口内多封推送（合并为一封发出）。
+    groups = _digest_groups(cfg)
+    fresh: list[tuple[date, list[Path]]] = []
+    for tag, files in sorted(groups.items()):
+        if tag in pushed:
+            continue
+        try:
+            d = date(int(tag[:4]), int(tag[4:6]), int(tag[6:]))
+        except ValueError:
+            continue
+        if d < date.today() - timedelta(days=max_age_days):
+            continue                          # 太久远的历史简报不补推
+        fresh.append((d, sorted(files)))
+    if not fresh:
         return False
-    if latest in pushed:                     # 该日期已推送过 → 无新内容
-        return False
-    # 只推「较新」的简报，避免首次运行把历史简报全发一遍
-    try:
-        d = date(int(latest[:4]), int(latest[4:6]), int(latest[6:]))
-    except ValueError:
-        return False
-    if d < date.today() - timedelta(days=max_age_days):
-        return False
-    _send_digest(cfg, d, files)
-    pushed[latest] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+    all_files = [f for _d, fs in fresh for f in fs]
+    _send_digest(cfg, [d for d, _ in fresh], all_files)
+    now = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+    for d, _fs in fresh:
+        pushed[f"{d:%Y%m%d}"] = now
     _save_pushed(cfg, pushed)
     return True
 
 
-def _send_digest(cfg, when: date, files: list[Path]) -> None:
+def _send_digest(cfg, dates: list[date], files: list[Path]) -> None:
+    """发送简报（支持跨多个邮件日期合并为一封）。"""
     doc = _assemble_doc(cfg, files)
     n_arts = 0
     for f in files:
         n_arts += sum(1 for line in f.read_text(encoding="utf-8").splitlines()
                       if line.startswith("### "))
-    subject = f"ADS 文献简报 {when:%Y-%m-%d}（{n_arts} 条文献）"
-    send_html(cfg, cfg.imap_user, subject, doc, agent="ads")
+    if len(dates) == 1:
+        label = f"{dates[0]:%Y-%m-%d}"
+    else:
+        label = f"{min(dates):%Y-%m-%d} ~ {max(dates):%Y-%m-%d}"
+    send_html(cfg, cfg.imap_user, f"ADS 文献简报 {label}（{n_arts} 条文献）", doc, agent="ads")
