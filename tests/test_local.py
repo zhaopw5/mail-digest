@@ -1168,6 +1168,65 @@ def test_official_cli_rejects_date_selector() -> None:
             _cleanup_env()
 
 
+
+
+# ---- 真实 CLI 入口的契约（审查者脚本走的路径：runpy/subprocess 进 argparse）----
+
+def _run_cli(args, data_dir, timeout=60):
+    import os
+    import subprocess
+    import sys
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["MAIL_DIGEST_DATA_DIR"] = data_dir
+    env.pop("MAIL_DIGEST_PUSH_TIME", None)
+    return subprocess.run([sys.executable, str(root / "main.py"), *args],
+                          cwd=str(root), env=env, capture_output=True,
+                          text=True, timeout=timeout)
+
+
+def test_cli_push_requires_mode_and_rejects_date() -> None:
+    """裸 `ads push` 必须报错；`--official --date` 必须被拒绝（不能静默忽略）。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            _ads_env(td)
+            r = _run_cli(["ads", "push"], td)
+            assert r.returncode != 0, r.stdout
+            assert "--official" in (r.stderr + r.stdout)
+            r2 = _run_cli(["ads", "push", "--official", "--date", "2026-09-10"], td)
+            assert r2.returncode != 0, r2.stdout
+            assert "不能同时使用" in (r2.stderr + r2.stdout), r2.stderr + r2.stdout
+        finally:
+            _cleanup_env()
+
+
+def test_cli_state_init_requires_confirm_and_refuses_overwrite() -> None:
+    """state-init 走真实 CLI：已存在状态时拒绝；--mark-existing-sent 需 --confirm。"""
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 9001, _window_time(cfg))
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
+                delivery.push_official(cfg)          # 造出一份真实已发送状态
+            before = json.loads(cfg.ads_state_file.read_text(encoding="utf-8"))
+            r = _run_cli(["ads", "state-init", "--last-official",
+                          "2026-09-11 09:00:00+08:00"], td)
+            assert r.returncode != 0, r.stdout
+            assert "已存在" in (r.stderr + r.stdout), r.stderr + r.stdout
+            assert json.loads(cfg.ads_state_file.read_text(encoding="utf-8")) == before
+            r2 = _run_cli(["ads", "state-init", "--last-official",
+                           "2026-09-11 09:00:00+08:00", "--force",
+                           "--mark-existing-sent"], td)
+            assert r2.returncode != 0, r2.stdout     # 缺 --confirm
+            assert "confirm" in (r2.stderr + r2.stdout).lower()
+        finally:
+            _cleanup_env()
+
+
 if __name__ == "__main__":
     test_is_valid_bibcode()
     test_is_ads_email()
@@ -1209,6 +1268,8 @@ if __name__ == "__main__":
     test_state_init_refuses_overwrite_and_backs_up()
     test_state_init_marks_only_mail_before_cutoff()
     test_official_cli_rejects_date_selector()
+    test_cli_push_requires_mode_and_rejects_date()
+    test_cli_state_init_requires_confirm_and_refuses_overwrite()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()

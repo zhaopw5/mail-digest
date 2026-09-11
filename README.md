@@ -253,6 +253,8 @@ pip install -e ".[all]"       # 两个都要
      写完用 `date` 和实际收到的邮件时间对一次。
 6. 产物：英文/中文简报与清单在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
    本地测试：`python3 tests/test_local.py`（无网络）。
+   状态文件（游标/处理状态/推送状态）的字段与不变量见
+   [`docs/state-files.md`](docs/state-files.md)——改代码或写审计脚本时先看它。
 
 ### 项目结构（core + 两个处理器）
 
