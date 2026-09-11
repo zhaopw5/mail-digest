@@ -111,12 +111,17 @@ class Config:
     grants_processed_file: Path = PROJECT_ROOT / "data" / "processed_fund.json"  # 基金状态
     grants_cache_file: Path = PROJECT_ROOT / "data" / "fund_cache.json"
     llm_usage_log_file: Path = PROJECT_ROOT / "data" / "llm_usage.log"
-    ads_state_file: Path = PROJECT_ROOT / "data" / "ads_state.json"   # ADS 正式推送状态机    # 基金提取缓存
+    ads_state_file: Path = PROJECT_ROOT / "data" / "ads_state.json"   # ADS 正式推送状态机
+    ads_manifest_file: Path = PROJECT_ROOT / "data" / "ads_manifest.json"  # ADS 逐封处理状态（按 source_id）
+    imap_state_file: Path = PROJECT_ROOT / "data" / "imap_state.json"      # 拉取游标（uidvalidity/last_uid/gaps）
+    ads_lock_file: Path = PROJECT_ROOT / "data" / ".ads_official.lock"     # 正式推送互斥锁
 
     # ---- 行为 ----
-    default_recent: int = 50            # fetch 默认拉最近 N 封
+    default_recent: int = 50            # fetch --recent 的缺省值（显式给定时才截断）
+    fetch_initial_max: int = 5000       # 首次接管邮箱时的全量拉取上限（防超大邮箱拖死）
     default_folder: str = "INBOX"
     default_ads_limit: int = 20         # ads 一次最多处理的邮件数
+    push_time: str = "09:00"            # 计划推送时刻（决定正式推送的截止点口径）
 
     def tz(self):
         """返回配置时区（zoneinfo）；失败时回退系统本地时区。"""
@@ -126,6 +131,21 @@ class Config:
         except Exception:
             from datetime import datetime as _dt
             return _dt.now().astimezone().tzinfo
+
+    def planned_cutoff(self, now=None):
+        """本次正式推送的计划截止点：最近一个已经过去的 push_time。
+
+        cron 在 09:00 触发（或稍晚）时，截止点固定为当天 09:00——09:00 之后
+        才到达的邮件留给下一次，不会因为进程启动晚了就混进本窗口。
+        """
+        from datetime import datetime as _dt, timedelta as _td
+        now = now or _dt.now(self.tz())
+        try:
+            hh, mm = (int(x) for x in str(self.push_time).split(":")[:2])
+        except Exception:
+            hh, mm = 9, 0
+        today_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        return today_at if now >= today_at else today_at - _td(days=1)
 
     def apply_data_dir(self, data_dir: Path) -> None:
         """把数据目录及其全部派生子路径一次性重算（新增字段必须加在这里）。"""
@@ -139,6 +159,9 @@ class Config:
         self.grants_cache_file = data_dir / "fund_cache.json"
         self.llm_usage_log_file = data_dir / "llm_usage.log"
         self.ads_state_file = data_dir / "ads_state.json"
+        self.ads_manifest_file = data_dir / "ads_manifest.json"
+        self.imap_state_file = data_dir / "imap_state.json"
+        self.ads_lock_file = data_dir / ".ads_official.lock"
 
     # ---- 域级 LLM key 解析（前缀优先，回退公共 key）----
     def ads_llm_key(self) -> str:

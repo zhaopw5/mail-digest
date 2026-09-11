@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from . import attachments as att
@@ -335,7 +335,7 @@ def _cache_status(cached: dict) -> str:
 
 
 def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
-             limit: int | None = None) -> tuple[int, str | None]:
+             limit: int | None = None, today=None) -> tuple[int, str | None]:
     """处理基金邮件，返回 (处理封数, 当日清单文本 or None)。
 
     安全：只处理可信发件人（cfg.grant_allowed_senders 白名单）的邮件附件，
@@ -410,4 +410,6 @@ def run_fund(cfg: Config, grant_mails: list[Mail], force: bool = False,
     # 若只按邮件日期==今天过滤，昨天下午到达、今早才处理的通知会静默漏推。
     if not results:
         return len(todo), None
-    return len(todo), build_daily_list(results, date.today())
+    if today is None:
+        today = datetime.now(cfg.tz()).date()
+    return len(todo), build_daily_list(results, today)

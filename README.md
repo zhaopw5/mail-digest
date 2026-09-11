@@ -195,7 +195,7 @@ pip install -e ".[all]"       # 两个都要
    LLM 点评与相关性分级将贴合你的研究方向。
 3. **运行**（两个 Agent 独立使用；公共底座命令见下）：
    ```bash
-   python3 main.py fetch                 # 公共：拉取邮件到 data/emails
+   python3 main.py fetch                 # 公共：按 UID 增量拉取（首次接管默认全量）
    # ADS 文献 Agent
    python3 main.py ads run               # 推送识别 → ADS API → 中文翻译/点评/分级简报
    python3 main.py ads push --official   # 正式推送：发送本次截止点前所有未发送简报（唯一会改状态、留痕的模式）
@@ -204,10 +204,16 @@ pip install -e ".[all]"       # 两个都要
    # 项目申报 Agent
    python3 main.py grants run            # 申报通知 → 附件安全解析 → 申报机会清单
    python3 main.py grants push           # 当天清单邮件发给自己
-   python3 main.py ads state-init --last-official "2026-09-11 09:27:00+08:00"   # 首次接管邮箱时，声明历史简报已发送
+   python3 main.py ads state-init --last-official "2026-09-11 09:00:00+08:00"   # 首次接管：只声明截止点，不动历史简报
    python3 main.py all                   # 一键：fetch + 已启用 Agent
    python3 main.py html                  # 重新生成合并 HTML 总览
    ```
+
+   `ads state-init` 是**接管已有邮箱**时的一次性操作，默认安全优先：
+   - 只写截止点，**不会**把历史简报标成已发送（避免了"新邮件被当成已发送而漏推"）；
+   - 已存在状态文件时直接拒绝执行，确需重建要加 `--force`（会先留时间戳备份）；
+   - 确实想把历史简报声明为已发送，必须显式 `--mark-existing-sent --confirm`，
+     且**只标记截止点之前**的那些，晚于截止点的照常推送。
 4. **域开关**：只要其中一个 Agent，就在 .env 里 `ADS_ENABLED=false` 或 `GRANTS_ENABLED=false`；
    不想把基金附件发往云端模型时，只填 `ADS_LLM_API_KEY`（不填公共 `DEEPSEEK_API_KEY`）。
 5. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点（`&&` 保证某步失败即停，
@@ -219,15 +225,32 @@ pip install -e ".[all]"       # 两个都要
    前提：机器在设定时间保持开机；错过可用同一条命令手动补跑。
 
    推送边界（重要）：Agent 按**邮件到达时间（IMAP INTERNALDATE）**判断，而不是邮件里的
-   `Date:` 头，也不是"今天"这一天。每次正式推送会记录一个截止点（cutoff），只发送
-   "截止点之前收到、且从未正式发送过"的简报；因此：
-   - 昨晚 19:00 收到的 ADS 邮件，今早 9:00 推送一定包含（不因跨日期而漏）；
-   - 停机几天后恢复，会把这几天积压的简报一次补齐（无 3 天窗口限制）；
-   - 正式推送失败时截止点不推进，下次自动重发同一批（不漏不重）；
+   `Date:` 头，也不是"今天"这一天。
+
+   - **截止点 = 计划推送时刻**（`MAIL_DIGEST_PUSH_TIME`，默认 09:00），不是进程启动时间。
+     09:10 才跑起来时，09:05 到达的邮件仍属于下一个窗口，不会被提前混进本次推送。
+   - **逐封身份**：每封原始邮件用 `文件夹:UIDVALIDITY:UID` 标识。服务器重新编号
+     （UIDVALIDITY 变化）后，同号新邮件不会被当成"旧邮件已发送"而跳过。
+   - **处理成功才允许推送**：`ads run` 逐封记录 `ready` / `empty` / `retryable_error`；
+     ADS API 或 LLM 失败时该邮件**不会**被记成已处理，下次运行自动重试（不是空话）。
+   - **拉取是增量的**：按 UID 游标只取新邮件，失败的邮件进入缺口队列持续重试；
+     首次接管默认全量（上限 `MAIL_DIGEST_FETCH_INITIAL_MAX`，超出会分批补拉，不会静默丢弃）。
+   - 停机几天后恢复会把积压简报一次补齐（无 3 天窗口限制）；SMTP 发送失败时截止点不推进，
+     下次自动重发同一批。
+   - 状态文件损坏时**直接中止且不发信**；正式推送持文件锁，两个进程不会并发重复发送。
    - `--test` / `--dry-run` 永不改变正式状态，可放心反复验证。
 
-   时区：`MAIL_DIGEST_TIMEZONE`（默认 `Asia/Shanghai`）决定日志、简报文件名与"早 9 点窗口"的
-   计算口径；服务器在境外时务必显式设置。
+   时区（两条链路要分开看）：
+
+   - **程序内部口径**（日志、简报文件名、截止点计算）由 `MAIL_DIGEST_TIMEZONE`
+     （默认 `Asia/Shanghai`）决定。
+   - **cron 何时触发**由**系统时区**决定，跟 `MAIL_DIGEST_TIMEZONE` 无关。服务器是 UTC 时，
+     `0 9 * * *` 会在北京时间 17:00 触发，看起来就像"今天没推送"。
+     **先 `date` 确认系统时区**，再决定怎么写时刻：系统为北京时间就写 `0 9 * * *`，
+     系统为 UTC 就写 `0 1 * * *`（= 北京 09:00）。
+   - 网上常见的 `CRON_TZ=Asia/Shanghai` 写法**不要照抄**：本机（Debian cron）实测它不生效——
+     cron 会把这一行当成普通环境变量，触发时刻仍按系统时区。想省心就按上面换算时刻，
+     写完用 `date` 和实际收到的邮件时间对一次。
 6. 产物：英文/中文简报与清单在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
    本地测试：`python3 tests/test_local.py`（无网络）。
 
@@ -319,9 +342,21 @@ tail -n 40 data/cron.log          # 定时任务日志（9:00 自动运行）
 |---|---|---|
 | 日志有「跳过 N 封非可信发件人的邮件」 | 发件人不在 `GRANT_ALLOWED_SENDERS` 白名单（安全拦截，正常） | cron.log |
 | 清单里该条带 ⚠️ | 附件读不了（rar 未装工具/老 .doc/图片/损坏文件） | 清单 md 里 ⚠️ 行 |
-| 当天清单为空 | 当天收到的通知都处理了，但「邮件日期」不是当天 → 只缓存不入当日清单 | 结果见 fund_cache.json |
+| 清单为空 | 本次运行没有待处理的通知（都已处理过）；跨天积压的通知会一起进清单，不会因为日期不同被丢掉 | `data/fund_cache.json` |
+| 状态邮件说「发现新邮件但处理失败」 | 附件/LLM 处理失败的邮件**不会**被标记为已处理，下次运行自动重试 | `data/fund_cache.json` 中 `retryable_error` 项 |
 
-### 14.4 验证「附件真的解压了」
+### 14.4 ADS 推送排查（新机制）
+
+| 现象 | 含义 | 怎么查 |
+|---|---|---|
+| 状态邮件说「本次未检测到有效的邮件拉取记录」 | 截止点之后没有成功拉取过邮箱，程序不敢断言"没有新邮件" | `data/imap_state.json` 的 `last_fetch_at`；cron 里 `fetch` 是否在 push 之前成功 |
+| 状态邮件说「发现新邮件但处理失败」 | 有 ADS 邮件没能生成简报（API/LLM 失败），**没有被**记成已处理 | `data/ads_manifest.json` 中 `retryable_error` 项；重跑 `ads run` 即可 |
+| 状态邮件说「有 N 封邮件上次拉取失败，仍在待重试队列」 | 单封拉取失败，游标没有越过它 | `data/imap_state.json` 的 `gaps`；下次 `fetch` 自动重试 |
+| 报错「状态文件损坏，已中止本次正式推送」 | 程序拒绝在状态可疑时发信（宁可停一次，也不重复发或漏发） | `data/ads_state.json`；人工确认后删除或从 `ads_state.json.bak` 恢复 |
+| 报错「另一个 ADS 正式推送正在进行」 | 有并发进程持锁；若确认没有，删除 `data/.ads_official.lock` | — |
+| `data/emails/_legacy_unidentified/` 里有文件 | 旧版本留下的、无法确认身份的缓存；程序已用带 UIDVALIDITY 的新文件取代它们 | 核对无误后可自行删除该目录 |
+
+### 14.5 验证「附件真的解压了」
 
 1）看处理现场（每封处理的解压产物保留在 work 目录，uid 为邮件编号）：
 
@@ -351,7 +386,7 @@ print(len(r), '个可读文件，', len(p), '个问题')
 
 3）原始附件对照：`data/emails/*.eml` 是完整原始邮件，用邮件客户端或解压软件打开即可看到服务器上收到的附件原文。
 
-### 14.5 安全边界自查
+### 14.6 安全边界自查
 
 **发件人白名单是否生效**（改 .env 后验证）：
 
@@ -365,7 +400,7 @@ print('外部发件人被拦:', not sender_allowed('攻击者 <x@evil.org>', cfg
 "
 ```
 
-**恶意压缩包被拒**：用 14.4 的命令手动构造一个含符号链接或 `../` 条目的
+**恶意压缩包被拒**：用 14.5 的命令手动构造一个含符号链接或 `../` 条目的
 zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tests 中
 `test_zip_path_traversal_blocked` / `test_tar_symlink_blocked` / `test_zip_bomb_blocked`
 就是自动化版本）。
@@ -374,7 +409,7 @@ zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tes
 （关键字段逐字引用出处）；若模型日期与正则独立提取的日期不一致，会输出
 `⚠️ 截止日期校验失败/不一致` 警告。当心：这些警告出现时以原文证据为准，勿信模型结论。
 
-### 14.6 产物是什么（不再迷路）
+### 14.7 产物是什么（不再迷路）
 
 | 文件 | 内容 |
 |---|---|
@@ -458,7 +493,9 @@ zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tes
 | `ADS_LLM_API_KEY` / `GRANTS_LLM_API_KEY` | 可选：给单个 Agent 用独立 key（不回退公共） | 可选 |
 | `GRANTS_STRICT_AUTH` | `true` = 只处理通过了邮箱服务器 SPF/DKIM 认证的申报邮件（更安全，见第 13 节） | 可选 |
 | `MAIL_DIGEST_DATA_DIR` | 数据目录（默认项目内 `data/`），多人部署时建议各自独立目录 | 可选 |
-| `MAIL_DIGEST_TIMEZONE` | 时区（默认 `Asia/Shanghai`），影响日志、简报文件名与推送窗口口径 | 可选 |
+| `MAIL_DIGEST_TIMEZONE` | 程序内部时区（默认 `Asia/Shanghai`）：日志、简报文件名、截止点计算。**不改变 cron 触发时刻** | 可选 |
+| `MAIL_DIGEST_PUSH_TIME` | 计划推送时刻（默认 `09:00`），决定正式推送的截止点：该时刻之后到达的邮件留到下一次 | 可选 |
+| `MAIL_DIGEST_FETCH_INITIAL_MAX` | 首次接管邮箱时单轮全量拉取上限（默认 5000），超出会分批继续补拉，不会丢弃 | 可选 |
 
 **两个完整示例**：
 

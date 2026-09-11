@@ -1,8 +1,6 @@
 """Grants Agent 操作（本域 CLI 与 mail-digest 共用；不依赖 ads 模块）。"""
 from __future__ import annotations
 
-from datetime import date
-
 import argparse
 
 from ...core.imap_client import load_mails_from_dir
@@ -11,6 +9,12 @@ from ...core.ops import parse_date_arg as _parse_date_arg
 from ...core.push import send_markdown
 from .classifier import is_grant_email
 from .processor import run_fund
+
+def _today(cfg: Config):
+    """配置时区下的「今天」（不是进程本地时区，服务器在境外时这点很重要）。"""
+    from datetime import datetime
+    return datetime.now(cfg.tz()).date()
+
 
 def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
     if not cfg.grants_enabled:
@@ -25,19 +29,20 @@ def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
         print("⚠️  未配置 GRANT_ALLOWED_SENDERS（可信发件人白名单）——为防恶意附件，跳过全部基金邮件附件处理。")
         print("    请在 .env 配置，如：GRANT_ALLOWED_SENDERS=*@mail.sysu.edu.cn")
         return
-    mails = load_mails_from_dir(cfg.eml_dir)
+    mails = load_mails_from_dir(cfg.eml_dir, cfg.default_folder, tz=cfg.tz())
     grant_mails = [m for m in mails if is_grant_email(m)]
-    print(f"扫描 {len(mails)} 封邮件，识别出 {len(grant_mails)} 封基金/项目申报通知")
+    print(f"扫描缓存 {len(mails)} 封邮件，识别出 {len(grant_mails)} 封基金/项目申报通知")
     force = getattr(args, "force", False)
     limit = getattr(args, "limit", None)
-    n, digest_text = run_fund(cfg, grant_mails, force=force, limit=limit)
+    n, digest_text = run_fund(cfg, grant_mails, force=force, limit=limit,
+                              today=_today(cfg))
     if n == 0:
         print("没有待处理的新申报通知（已全部处理过；用 --force 强制重跑）")
         return
     print(f"共处理 {n} 封")
     if digest_text:
         cfg.digest_dir.mkdir(parents=True, exist_ok=True)
-        out = cfg.digest_dir / f"fund_{date.today():%Y%m%d}.md"
+        out = cfg.digest_dir / f"fund_{_today(cfg):%Y%m%d}.md"
         out.write_text(digest_text, encoding="utf-8")
         print(f"📄 今日申报清单已生成：{out}")
     else:
@@ -45,7 +50,7 @@ def cmd_grants_run(cfg: Config, args: argparse.Namespace) -> None:
 
 def cmd_grants_push(cfg: Config, args: argparse.Namespace) -> None:
     explicit = getattr(args, "date", None)
-    when = _parse_date_arg(explicit) or date.today()
+    when = _parse_date_arg(explicit) or _today(cfg)
     f = cfg.digest_dir / f"fund_{when:%Y%m%d}.md"
     if not f.exists():
         if explicit is None and not getattr(args, "dry_run", False):
@@ -67,7 +72,7 @@ def _send_grants_status_empty(cfg: Config) -> None:
     """发送『今日无新申报通知』状态邮件（让用户每天都能确认 Agent 已检查）。"""
     from ...core.push import send_html
 
-    today = date.today()
+    today = _today(cfg)
     html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>项目申报状态</title></head>
 <body style="font-family:sans-serif;max-width:640px;margin:2em auto;line-height:1.7">
 <h2 style="color:#0b3d91">项目申报 Agent · 每日状态 {today:%Y-%m-%d}</h2>

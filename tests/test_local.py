@@ -534,9 +534,28 @@ def test_grants_push_empty_sends_status() -> None:
 
 
 
-# ---------------- ADS 正式推送状态机（四种状态分离）----------------
+# ---------------- ADS：身份 / 增量拉取 / 处理状态机 / 正式推送 ----------------
 
-def _ads_env(td):
+def _window_time(cfg, minutes=5):
+    """当前推送窗口内的收件时间（计划截止点前 minutes 分钟）。"""
+    from datetime import timedelta
+    return cfg.planned_cutoff() - timedelta(minutes=minutes)
+
+
+def _mark_fetched(cfg, when=None):
+    """写入一次拉取记录（真实 cron 顺序是 fetch → run → push）。"""
+    from datetime import datetime
+    from mail_digest.core.imap_client import load_imap_state
+    from mail_digest.core.state import write_json_atomic
+    st = load_imap_state(cfg)
+    st[cfg.default_folder] = {
+        "uidvalidity": 1, "last_uid": 0, "gaps": [], "uncovered_below": None,
+        "last_fetch_at": (when or datetime.now(cfg.tz())).isoformat(timespec="seconds"),
+    }
+    write_json_atomic(cfg.imap_state_file, st)
+
+
+def _ads_env(td, push_time="09:00", fetched=True, **over):
     import os
     os.environ["MAIL_DIGEST_DATA_DIR"] = td
     from mail_digest.core.config import Config
@@ -544,135 +563,266 @@ def _ads_env(td):
     cfg.imap_user = "me@test.edu.cn"
     cfg.smtp_host = "smtp.test.edu.cn"
     cfg.smtp_port = 465
-    cfg.eml_dir.mkdir(parents=True, exist_ok=True)
-    cfg.zh_digest_dir.mkdir(parents=True, exist_ok=True)
+    cfg.push_time = push_time
+    for k, v in over.items():
+        setattr(cfg, k, v)
+    for d in (cfg.eml_dir, cfg.digest_dir, cfg.zh_digest_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    if fetched:
+        _mark_fetched(cfg)
     return cfg
 
 
-def _add_ads_mail(cfg, uid, received_at, with_digest=True):
-    """构造一封 ADS 原始邮件（.eml + sidecar 索引）与可选简报，返回 source_id。"""
-    import json
+def _cleanup_env():
+    import os
+    os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def _ads_raw_mail(uid, received_at, bibcode="2024ApJ...963..100A",
+                  subject="myADS notification"):
+    """构造一封原始 ADS 邮件字节（含 ADS 链接，可被 is_ads_email 识别）。"""
     from email.message import EmailMessage
     msg = EmailMessage()
-    msg["From"] = "ads@cfa.harvard.edu"
-    msg["Subject"] = "Daily myADS Notification"
+    msg["From"] = "library@adsabs.harvard.edu"
+    msg["To"] = "me@test.edu.cn"
+    msg["Subject"] = subject
     msg["Date"] = received_at.strftime("%a, %d %b %Y %H:%M:%S %z")
-    msg.set_content("myADS Personal Notification Service Results")
-    eml = cfg.eml_dir / f"{received_at:%Y%m%d}_{uid:06d}.eml"
-    eml.write_bytes(msg.as_bytes())
-    idxf = cfg.eml_dir / "index.json"
-    idx = json.loads(idxf.read_text(encoding="utf-8")) if idxf.exists() else {}
-    sid = f"INBOX:1:{uid}"
-    idx[str(uid)] = {"source_id": sid, "folder": "INBOX", "uidvalidity": 1,
-                     "received_at": received_at.isoformat(timespec="seconds"),
-                     "eml": eml.name}
-    idxf.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+    msg["Message-ID"] = f"<ads-{uid}@adsabs.harvard.edu>"
+    msg.set_content(f"1 new article:\n\nhttps://ui.adsabs.harvard.edu/abs/{bibcode}/abstract\n")
+    return msg.as_bytes()
+
+
+def _add_cached_ads_mail(cfg, uid, received_at, uidvalidity=1, status="ready",
+                         with_digest=True, subject="myADS notification"):
+    """把一封 ADS 邮件写进缓存（新命名 + 索引 + manifest + 简报），返回 source_id。"""
+    from mail_digest.core.imap_client import eml_name, load_index, save_index
+    from mail_digest.processors.ads.manifest import load_manifest, save_manifest, upsert
+    tag = f"{received_at:%Y%m%d}"
+    name = eml_name(tag, uid, uidvalidity)
+    (cfg.eml_dir / name).write_bytes(_ads_raw_mail(uid, received_at, subject=subject))
+    sid = f"INBOX:{uidvalidity}:{uid}"
+    idx = load_index(cfg.eml_dir)
+    idx["emails"][name] = {"source_id": sid, "folder": "INBOX", "uid": uid,
+                           "uidvalidity": uidvalidity,
+                           "received_at": received_at.isoformat(timespec="seconds")}
+    save_index(cfg.eml_dir, idx)
+    en = zh = None
     if with_digest:
-        (cfg.zh_digest_dir / f"ads_{received_at:%Y%m%d}_{uid:06d}.zh.md").write_text(
-            "# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）"
-            "\n\n### 1. Title\n", encoding="utf-8")
+        en = f"ads_{tag}_{uid:06d}.md"
+        (cfg.digest_dir / en).write_text("# ADS digest\n\n### 1. Title\n", encoding="utf-8")
+        zh = f"ads_{tag}_{uid:06d}.zh.md"
+        (cfg.zh_digest_dir / zh).write_text(
+            "# ADS 文献简报（中文版）\n\n## 订阅 · 命中（1 条）\n\n### 1. Title\n"
+            "- **中文题目**：标题中文\n", encoding="utf-8")
+    if status is not None:                  # status=None：只落地邮件，模拟「尚未处理」
+        mf = load_manifest(cfg)
+        upsert(cfg, mf, sid, status=status,
+              received_at=received_at.isoformat(timespec="seconds"),
+              en_file=en, zh_file=zh, errors=[])
+        save_manifest(cfg, mf)
     return sid
 
 
-def test_official_includes_cross_day_mail() -> None:
-    """① 跨日期窗口：昨天 19 点收到 → 今早正式推送必须包含。"""
-    import json, os, tempfile
-    from datetime import datetime, timedelta
-    from unittest import mock
-    from mail_digest.processors.ads import delivery
+class _FakeIMAP:
+    """最小 IMAP 假对象：只实现 fetch_recent 用到的命令，用于验证增量拉取。"""
 
+    def __init__(self, host=None, port=None, timeout=None):
+        self.messages = {}          # uid -> (meta, raw)
+        self.validity = 1
+        self.fail_uids = set()
+        self.searches = []
+
+    def login(self, user, pwd):
+        return "OK", [b"logged in"]
+
+    def select(self, folder, readonly=False):
+        return "OK", [b"1"]
+
+    def status(self, folder, what):
+        return "OK", [f"{folder} (UIDVALIDITY {self.validity})".encode()]
+
+    def logout(self):
+        return "BYE", [b"bye"]
+
+    def uid(self, cmd, *args):
+        if cmd == "search":
+            crit = args[1]
+            self.searches.append(crit)
+            uids = sorted(self.messages)
+            if crit == "ALL":
+                sel = uids
+            else:
+                n = int(crit.split()[1].split(":")[0])
+                sel = [u for u in uids if u >= n]     # 服务器语义：* 表示最大 UID
+            return "OK", [b" ".join(str(u).encode() for u in sel)]
+        if cmd == "fetch":
+            uid = int(args[0])
+            if uid in self.fail_uids:
+                return "NO", [None]
+            if uid not in self.messages:
+                return "OK", [None]
+            return "OK", [self.messages[uid]]
+        return "NO", [None]
+
+
+def _put_mail(fake, uid, when, ads=True, bibcode="2024ApJ...963..100A"):
+    raw = _ads_raw_mail(uid, when, bibcode=bibcode) if ads else (
+        b"From: someone@example.com\r\nSubject: \xe6\x99\xae\xe9\x80\x9a\xe9\x82\xae\xe4\xbb\xb6\r\n"
+        b"Date: " + when.strftime("%a, %d %b %Y %H:%M:%S %z").encode() + b"\r\n\r\nhello\r\n")
+    meta = (f'1 (INTERNALDATE "{when.strftime("%d-%b-%Y %H:%M:%S %z")}" '
+            f"RFC822 {{{len(raw)}}}").encode()
+    fake.messages[uid] = (meta, raw)
+
+
+def _patch_imap(fake):
+    from unittest import mock
+    return mock.patch("mail_digest.core.imap_client.imaplib.IMAP4_SSL",
+                      side_effect=lambda *a, **k: fake)
+
+
+def _patch_smtp():
+    from unittest import mock
+    return mock.patch("mail_digest.processors.ads.delivery.send_html")
+
+
+# ---- 推送窗口（审查 case 01/07/08/18）----
+
+def test_official_includes_cross_day_mail() -> None:
+    """① 跨日期窗口：昨天 19 点收到的邮件，今早正式推送必须包含。"""
+    import tempfile
+    from datetime import datetime, timedelta
     with tempfile.TemporaryDirectory() as td:
         try:
             cfg = _ads_env(td)
             recv = datetime.now(cfg.tz()) - timedelta(hours=14)
-            _add_ads_mail(cfg, 1001, recv)
-            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
+            _add_cached_ads_mail(cfg, 1001, recv)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
                 r = delivery.push_official(cfg)
-                assert r["sent"] is True and r["n_items"] == 1, r
-                assert m.call_args.args[2].startswith("ADS 文献简报"), m.call_args.args[2]
-            st = json.loads(cfg.ads_state_file.read_text(encoding="utf-8"))
+            assert r["sent"] is True and r["n_items"] == 1, r
+            assert m.call_args.args[2].startswith("ADS 文献简报"), m.call_args.args[2]
+            st = delivery.load_state(cfg)
             assert st["items"]["INBOX:1:1001"]["official_sent_at"]
         finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+            _cleanup_env()
 
 
-def test_test_mode_does_not_touch_official_state() -> None:
-    """② 测试隔离：连发 3 次 --test，正式状态不变，随后正式推送仍包含内容。"""
-    import os, tempfile
-    from datetime import datetime
-    from unittest import mock
-    from mail_digest.processors.ads import delivery
-
-    with tempfile.TemporaryDirectory() as td:
-        try:
-            cfg = _ads_env(td)
-            _add_ads_mail(cfg, 1002, datetime.now(cfg.tz()))
-            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
-                for _ in range(3):
-                    r = delivery.push_test(cfg)
-                    assert r["subject"].startswith("[TEST] ")
-                assert m.call_count == 3
-                assert all(c.args[2].startswith("[TEST] ") for c in m.call_args_list)
-            assert not cfg.ads_state_file.exists() or not delivery.load_state(cfg)["items"]
-            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
-                r2 = delivery.push_official(cfg)
-            assert r2["sent"] is True and r2["n_items"] == 1, r2
-        finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
-
-
-def test_same_day_second_mail_sent_next_run() -> None:
-    """③ 同日期第二封：第一封正式发送后新到的第二封，下次正式推送必须包含。"""
-    import os, tempfile
-    from datetime import datetime
-    from unittest import mock
-    from mail_digest.processors.ads import delivery
-
+def test_planned_cutoff_excludes_late_arrival() -> None:
+    """审查 case 18：09:10 才执行时，截止点仍是 09:00，09:05 到达的邮件不混进本次。"""
+    import tempfile
+    from datetime import datetime, timedelta
     with tempfile.TemporaryDirectory() as td:
         try:
             cfg = _ads_env(td)
             now = datetime.now(cfg.tz())
-            _add_ads_mail(cfg, 1003, now)
-            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
-                assert delivery.push_official(cfg)["n_items"] == 1
-            _add_ads_mail(cfg, 1004, now)                      # 同日第二封
-            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+            planned = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if planned > now:
+                planned -= timedelta(days=1)
+            # 计划截止点之后、当前时刻之前到达的邮件
+            late = planned + timedelta(minutes=5)
+            _add_cached_ads_mail(cfg, 2001, late)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
                 r = delivery.push_official(cfg)
-            assert r["sent"] is True and r["n_items"] == 1, r   # 只发新增那封
+            assert r["sent"] is False, r
+            assert m.call_count == 1                      # 只有状态邮件
+            st = delivery.load_state(cfg)
+            assert st["last_official_cutoff"] == planned.isoformat(timespec="seconds"), st
         finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+            _cleanup_env()
+
+
+def test_boundary_mail_after_cutoff_goes_next_window() -> None:
+    """⑥ 边界：截止点之后到达的邮件本次不发，进入下一次正式窗口。"""
+    import tempfile
+    from datetime import datetime, timedelta
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            now = datetime.now(cfg.tz())
+            cutoff = now - timedelta(hours=1)
+            _add_cached_ads_mail(cfg, 1007, now)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
+                r1 = delivery.push_official(cfg, cutoff=cutoff)
+                assert r1["sent"] is False
+                assert "无新推送" in (r1.get("status_mail") or ""), r1
+                assert m.call_count == 1
+            with _patch_smtp():
+                r2 = delivery.push_official(cfg, cutoff=now + timedelta(minutes=1))
+            assert r2["sent"] is True and r2["n_items"] == 1, r2
+        finally:
+            _cleanup_env()
 
 
 def test_outage_over_three_days_still_backfilled() -> None:
-    """④ 停机四天：恢复后必须补发四天内全部未正式发送内容（无 3 天限制）。"""
-    import os, tempfile
+    """④ 停机四天：恢复后补发全部未发送内容（无 3 天限制）。"""
+    import tempfile
     from datetime import datetime, timedelta
-    from unittest import mock
-    from mail_digest.processors.ads import delivery
-
     with tempfile.TemporaryDirectory() as td:
         try:
             cfg = _ads_env(td)
             old = datetime.now(cfg.tz()) - timedelta(days=4)
-            _add_ads_mail(cfg, 1005, old)
-            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+            _add_cached_ads_mail(cfg, 1005, old)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
                 r = delivery.push_official(cfg)
             assert r["sent"] is True and r["n_items"] == 1, r
         finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+            _cleanup_env()
 
 
-def test_smtp_failure_does_not_advance_state() -> None:
-    """⑤ SMTP 失败：状态不得推进；恢复后第二次必须重新发送。"""
-    import os, tempfile
-    from datetime import datetime
-    from unittest import mock
-    from mail_digest.processors.ads import delivery
-
+def test_same_day_second_mail_sent_next_run() -> None:
+    """③ 同日期第二封：第一封已发送后新到的第二封，下次必须包含。"""
+    import tempfile
     with tempfile.TemporaryDirectory() as td:
         try:
             cfg = _ads_env(td)
-            _add_ads_mail(cfg, 1006, datetime.now(cfg.tz()))
+            now = _window_time(cfg)
+            _add_cached_ads_mail(cfg, 1003, now)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
+                assert delivery.push_official(cfg)["n_items"] == 1
+            _add_cached_ads_mail(cfg, 1004, now)
+            with _patch_smtp():
+                r = delivery.push_official(cfg)
+            assert r["sent"] is True and r["n_items"] == 1, r
+        finally:
+            _cleanup_env()
+
+
+# ---- 测试/正式隔离与失败重试（case 02/03/06）----
+
+def test_test_mode_does_not_touch_official_state() -> None:
+    """② 测试隔离：连发 3 次 --test，正式状态不变，随后正式仍发送。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 1002, _window_time(cfg))
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
+                for _ in range(3):
+                    r = delivery.push_test(cfg)
+                    assert r["subject"].startswith("[TEST] ")
+                assert m.call_count == 3
+            assert not cfg.ads_state_file.exists() or not delivery.load_state(cfg)["items"]
+            with _patch_smtp():
+                r2 = delivery.push_official(cfg)
+            assert r2["sent"] is True and r2["n_items"] == 1, r2
+        finally:
+            _cleanup_env()
+
+
+def test_smtp_failure_does_not_advance_state() -> None:
+    """⑤ SMTP 失败：状态不得推进；恢复后必须重发。"""
+    import tempfile
+    from unittest import mock
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 1006, _window_time(cfg))
+            from mail_digest.processors.ads import delivery
             with mock.patch("mail_digest.processors.ads.delivery.send_html",
                             side_effect=RuntimeError("smtp down")):
                 try:
@@ -682,35 +832,340 @@ def test_smtp_failure_does_not_advance_state() -> None:
                     pass
             st = delivery.load_state(cfg)
             assert not st["items"] and not st["last_official_cutoff"], st
-            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+            with _patch_smtp():
                 assert delivery.push_official(cfg)["sent"] is True
         finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+            _cleanup_env()
 
 
-def test_boundary_mail_after_cutoff_goes_next_window() -> None:
-    """⑥ 边界：截止点之后到达的邮件本次不发，必须进入下一次正式窗口。"""
-    import os, tempfile
+def test_corrupt_state_blocks_official_push() -> None:
+    """审查 case 17：状态损坏必须中止发送，不能静默当空状态继续发信。"""
+    import tempfile
+    from mail_digest.core.state import StateCorruptError
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 3001, _window_time(cfg))
+            cfg.ads_state_file.write_text('{"schema_version": 2, "items": {', encoding="utf-8")
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
+                try:
+                    delivery.push_official(cfg)
+                    raise AssertionError("损坏状态必须中止")
+                except StateCorruptError:
+                    pass
+                assert m.call_count == 0, "状态损坏时不得发送任何邮件"
+        finally:
+            _cleanup_env()
+
+
+def test_official_invocation_is_locked() -> None:
+    """审查 P2：两个并发正式推送不能同时发送（文件锁互斥）。"""
+    import tempfile
+    from mail_digest.core.state import FileLock
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 3002, _window_time(cfg))
+            from mail_digest.processors.ads import delivery
+            with FileLock(cfg.ads_lock_file):
+                with _patch_smtp() as m:
+                    try:
+                        delivery.push_official(cfg)
+                        raise AssertionError("持锁期间第二次正式推送必须被拒绝")
+                    except RuntimeError as exc:
+                        assert "正在进行" in str(exc), exc
+                    assert m.call_count == 0
+        finally:
+            _cleanup_env()
+
+
+# ---- 处理状态机（case 11/13/14/20）----
+
+def test_failed_processing_is_retried_not_marked_done() -> None:
+    """审查 case 11：ADS API/LLM 失败后必须保持可重试，不能记成已处理。"""
+    import tempfile
+    from datetime import datetime
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.ads_api_token = ""                 # 离线模式 → 元数据必然缺失
+            now = datetime.now(cfg.tz())
+            _add_cached_ads_mail(cfg, 4001, now, uidvalidity=1, with_digest=False,
+                                 status=None)
+            from mail_digest.processors.ads import manifest as mfmod
+            from mail_digest.processors.ads import ops as adsops
+            from mail_digest.processors.ads.manifest import done_source_ids, load_manifest
+            mfmod.save_manifest(cfg, {"schema_version": mfmod.SCHEMA_VERSION, "items": {}})
+
+            import argparse
+            args = argparse.Namespace(force=False, limit=None)
+            adsops.cmd_ads_run(cfg, args)
+            mf = load_manifest(cfg)
+            assert mf["items"]["INBOX:1:4001"]["status"] == "retryable_error", mf["items"]
+            assert "INBOX:1:4001" not in done_source_ids(mf)
+            # 第二次运行必须仍然处理它（旧实现的 bug 是直接跳过）
+            adsops.cmd_ads_run(cfg, args)
+            assert load_manifest(cfg)["items"]["INBOX:1:4001"]["status"] == "retryable_error"
+        finally:
+            _cleanup_env()
+
+
+def test_uidvalidity_reuse_processes_new_mail() -> None:
+    """审查 case 14：UIDVALIDITY 变化后同样 UID 的新邮件不能被旧记录冒名跳过。"""
+    import tempfile
     from datetime import datetime, timedelta
-    from unittest import mock
-    from mail_digest.processors.ads import delivery
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.ads_api_token = ""
+            now = datetime.now(cfg.tz())
+            # 旧身份：已处理成功 → 记入 manifest
+            _add_cached_ads_mail(cfg, 1, now - timedelta(days=1), uidvalidity=1,
+                                 with_digest=False)
+            # 服务器重新编号后收到的新邮件，UID 又是 1，但身份是 INBOX:2:1（尚未处理）
+            _add_cached_ads_mail(cfg, 1, now, uidvalidity=2, with_digest=False,
+                                 status=None)
+            from mail_digest.processors.ads.manifest import (
+                done_source_ids, load_manifest, save_manifest)
+            mf = load_manifest(cfg)
+            save_manifest(cfg, mf)
+            assert done_source_ids(mf) == {"INBOX:1:1"}, done_source_ids(mf)
+            import argparse
+            from mail_digest.processors.ads import ops as adsops
+            adsops.cmd_ads_run(cfg, argparse.Namespace(force=False, limit=None))
+            mf2 = load_manifest(cfg)
+            assert "INBOX:2:1" in mf2["items"], "UIDVALIDITY=2 的新邮件被旧 UID 记录跳过了"
+            assert mf2["items"]["INBOX:2:1"]["status"] == "retryable_error", mf2["items"]
+        finally:
+            _cleanup_env()
 
+
+def test_missing_date_header_digest_is_pushable() -> None:
+    """审查 case 13：缺少 Date 头（nodate 简报）的邮件同样必须能被正式推送。"""
+    import tempfile
+    from mail_digest.core.imap_client import eml_name, load_index, save_index
+    from mail_digest.processors.ads.manifest import load_manifest, save_manifest, upsert
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            recv = _window_time(cfg)
+            name = eml_name("nodate", 5001, 1)
+            (cfg.eml_dir / name).write_bytes(_ads_raw_mail(5001, recv))
+            idx = load_index(cfg.eml_dir)
+            idx["emails"][name] = {"source_id": "INBOX:1:5001", "folder": "INBOX",
+                                   "uid": 5001, "uidvalidity": 1,
+                                   "received_at": recv.isoformat(timespec="seconds")}
+            save_index(cfg.eml_dir, idx)
+            zh = "ads_nodate_005001.zh.md"
+            (cfg.zh_digest_dir / zh).write_text(
+                "# ADS 文献简报（中文版）\n\n### 1. Title\n- **中文题目**：标题\n",
+                encoding="utf-8")
+            mf = load_manifest(cfg)
+            upsert(cfg, mf, "INBOX:1:5001", status="ready",
+                  received_at=recv.isoformat(timespec="seconds"),
+                  en_file=None, zh_file=zh, errors=[])
+            save_manifest(cfg, mf)
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
+                r = delivery.push_official(cfg)
+            assert r["sent"] is True and r["n_items"] == 1, r
+        finally:
+            _cleanup_env()
+
+
+def test_status_mail_reports_failures_and_fetch_evidence() -> None:
+    """审查 case 20/21：状态邮件要写明失败计数与是否有拉取记录。"""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td, fetched=False)
+            _add_cached_ads_mail(cfg, 6001, _window_time(cfg), with_digest=False,
+                                 status="retryable_error")
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp() as m:
+                r = delivery.push_official(cfg)
+            assert r["sent"] is False and r["failed_pending"] == 1, r
+            body = m.call_args.args[3]
+            assert "处理失败待重试：1 封" in body, body[:400]
+            assert "无记录" in body or "拉取" in body
+        finally:
+            _cleanup_env()
+
+
+# ---- 增量拉取（case 09 + 缺口重试 + UIDVALIDITY 重置）----
+
+def test_fetch_takes_all_not_only_last_50() -> None:
+    """审查 case 09：61 封邮件时，UID 最小的那封 ADS 不能被「只拉最后 50 封」丢掉。"""
+    import tempfile
+    from datetime import datetime, timedelta
+    from mail_digest.core.imap_client import fetch_recent
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.imap_auth_code = "x"
+            fake = _FakeIMAP()
+            base = datetime.now(cfg.tz()) - timedelta(days=2)
+            _put_mail(fake, 1, base, ads=True)             # 最早的 ADS 邮件
+            for uid in range(2, 62):
+                _put_mail(fake, uid, base + timedelta(minutes=uid), ads=False)
+            with _patch_imap(fake):
+                mails = fetch_recent(cfg)
+            assert len(mails) == 61, len(mails)
+            assert 1 in [m.uid for m in mails], "UID 1 的 ADS 邮件被遗漏（仍只拉最后 N 封）"
+            # 第二轮：只拉增量
+            _put_mail(fake, 62, base + timedelta(days=1), ads=True)
+            with _patch_imap(fake):
+                mails2 = fetch_recent(cfg)
+            assert [m.uid for m in mails2] == [62], [m.uid for m in mails2]
+        finally:
+            _cleanup_env()
+
+
+def test_fetch_gap_is_retried_until_success() -> None:
+    """单封拉取失败不能越过游标：留在缺口队列，下次自动重试。"""
+    import tempfile
+    from datetime import datetime, timedelta
+    from mail_digest.core.imap_client import fetch_recent, load_imap_state
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.imap_auth_code = "x"
+            fake = _FakeIMAP()
+            base = datetime.now(cfg.tz()) - timedelta(hours=3)
+            _put_mail(fake, 1, base, ads=True)
+            _put_mail(fake, 2, base + timedelta(minutes=1), ads=True)
+            _put_mail(fake, 3, base + timedelta(minutes=2), ads=True)
+            fake.fail_uids = {2}
+            with _patch_imap(fake):
+                mails = fetch_recent(cfg)
+            assert sorted(m.uid for m in mails) == [1, 3], [m.uid for m in mails]
+            st = load_imap_state(cfg)["INBOX"]
+            assert 2 in st["gaps"], st
+            fake.fail_uids = set()
+            with _patch_imap(fake):
+                mails2 = fetch_recent(cfg)
+            assert 2 in [m.uid for m in mails2], [m.uid for m in mails2]
+            assert load_imap_state(cfg)["INBOX"]["gaps"] == []
+        finally:
+            _cleanup_env()
+
+
+def test_uidvalidity_change_resets_cursor_and_identity() -> None:
+    """UIDVALIDITY 变化：重置游标重新接管，且同名 UID 的新邮件身份不同、不覆盖旧缓存。"""
+    import tempfile
+    from datetime import datetime, timedelta
+    from mail_digest.core.imap_client import fetch_recent, load_imap_state
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            cfg.imap_auth_code = "x"
+            fake = _FakeIMAP()
+            old = datetime.now(cfg.tz()) - timedelta(days=3)
+            _put_mail(fake, 1, old, ads=True)
+            with _patch_imap(fake):
+                fetch_recent(cfg)
+            assert load_imap_state(cfg)["INBOX"]["uidvalidity"] == 1
+            fake.validity = 2                              # 服务器重新编号
+            new = datetime.now(cfg.tz())
+            fake.messages = {}
+            _put_mail(fake, 1, new, ads=True)
+            with _patch_imap(fake):
+                mails = fetch_recent(cfg)
+            assert [m.source_id for m in mails] == ["INBOX:2:1"], [m.source_id for m in mails]
+            assert load_imap_state(cfg)["INBOX"]["uidvalidity"] == 2
+            names = sorted(p.name for p in cfg.eml_dir.glob("*.eml"))
+            assert len(names) == 2, names                   # 新旧两封邮件各自独立留存
+        finally:
+            _cleanup_env()
+
+
+# ---- 迁移安全（case 15/16/19）----
+
+def test_state_init_refuses_overwrite_and_backs_up() -> None:
+    """审查 case 16：重复初始化不得静默清空状态；--force 覆盖前必须备份。"""
+    import json
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_cached_ads_mail(cfg, 7001, _window_time(cfg))
+            from mail_digest.processors.ads import delivery
+            with _patch_smtp():
+                delivery.push_official(cfg)
+            before = json.loads(cfg.ads_state_file.read_text(encoding="utf-8"))
+            assert before["items"], before
+            try:
+                delivery.state_init(cfg, "2026-09-11 09:00:00+08:00")
+                raise AssertionError("已存在状态时 state-init 必须拒绝执行")
+            except ValueError as exc:
+                assert "已存在" in str(exc), exc
+            # 原状态未被改动
+            assert json.loads(cfg.ads_state_file.read_text(encoding="utf-8")) == before
+            delivery.state_init(cfg, "2026-09-11 09:00:00+08:00", force=True)
+            assert cfg.ads_state_file.exists()
+            backups = list(cfg.ads_state_file.parent.glob("ads_state.json.bak.*"))
+            assert backups, "覆盖前必须留下备份"
+        finally:
+            _cleanup_env()
+
+
+def test_state_init_marks_only_mail_before_cutoff() -> None:
+    """审查 case 15：--mark-existing-sent 不能把截止点之后收到的邮件标成已发送。"""
+    import tempfile
+    from datetime import datetime, timedelta
     with tempfile.TemporaryDirectory() as td:
         try:
             cfg = _ads_env(td)
             now = datetime.now(cfg.tz())
-            cutoff = now - timedelta(hours=1)
-            _add_ads_mail(cfg, 1007, now)                      # 晚于本次截止点
-            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
-                r1 = delivery.push_official(cfg, cutoff=cutoff)
-                assert r1["sent"] is False                     # 本次不发内容
-                assert "无新推送" in (r1.get("status_mail") or ""), r1
-                assert m.call_count == 1                       # 只发状态邮件，不发简报
-            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
-                r2 = delivery.push_official(cfg, cutoff=now + timedelta(minutes=1))
-            assert r2["sent"] is True and r2["n_items"] == 1, r2  # 下次窗口补发
+            cutoff = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if cutoff > now:
+                cutoff -= timedelta(days=1)
+            before = cutoff - timedelta(hours=12)
+            after = cutoff + timedelta(hours=1)
+            _add_cached_ads_mail(cfg, 8001, before)          # 截止点之前 → 应标记
+            _add_cached_ads_mail(cfg, 8002, after)           # 截止点之后 → 必须保留待发送
+            from mail_digest.processors.ads import delivery
+            try:
+                delivery.state_init(cfg, cutoff.isoformat(), mark_existing_sent=True)
+                raise AssertionError("--mark-existing-sent 必须先确认")
+            except ValueError as exc:
+                assert "confirm" in str(exc).lower() or "确认" in str(exc), exc
+            msg = delivery.state_init(cfg, cutoff.isoformat(), mark_existing_sent=True,
+                                      confirm=True)
+            st = delivery.load_state(cfg)
+            assert st["items"]["INBOX:1:8001"]["official_sent_at"], st["items"]
+            assert "INBOX:1:8002" not in st["items"], "截止点之后的邮件被错误标记为已发送"
+            assert "保留待发送 1 份" in msg, msg
+            # 截止点之后收到的邮件属于下一个窗口：当天推送不应包含它
+            with _patch_smtp():
+                r0 = delivery.push_official(cfg)
+            assert r0["sent"] is False, r0
+            # 显式把截止点推进到该邮件之后，才会发送
+            with _patch_smtp():
+                r = delivery.push_official(cfg, cutoff=after + timedelta(minutes=1))
+            assert r["sent"] is True and r["n_items"] == 1, r
         finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+            _cleanup_env()
+
+
+def test_official_cli_rejects_date_selector() -> None:
+    """审查 case 19：--official 与 --date 同时给出必须报错，而不是静默忽略日期。"""
+    import argparse
+    import tempfile
+    from mail_digest.processors.ads import ops as adsops
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            args = argparse.Namespace(official=True, test=False, dry_run=False,
+                                      date="2026-09-10", cutoff=None)
+            try:
+                adsops.cmd_ads_push(cfg, args)
+                raise AssertionError("--official --date 必须报错")
+            except SystemExit as exc:
+                assert "不能同时使用" in str(exc), exc
+        finally:
+            _cleanup_env()
 
 
 if __name__ == "__main__":
@@ -736,11 +1191,24 @@ if __name__ == "__main__":
     test_authserv_id_trust()
     test_grants_push_empty_sends_status()
     test_official_includes_cross_day_mail()
-    test_test_mode_does_not_touch_official_state()
-    test_same_day_second_mail_sent_next_run()
-    test_outage_over_three_days_still_backfilled()
-    test_smtp_failure_does_not_advance_state()
+    test_planned_cutoff_excludes_late_arrival()
     test_boundary_mail_after_cutoff_goes_next_window()
+    test_outage_over_three_days_still_backfilled()
+    test_same_day_second_mail_sent_next_run()
+    test_test_mode_does_not_touch_official_state()
+    test_smtp_failure_does_not_advance_state()
+    test_corrupt_state_blocks_official_push()
+    test_official_invocation_is_locked()
+    test_failed_processing_is_retried_not_marked_done()
+    test_uidvalidity_reuse_processes_new_mail()
+    test_missing_date_header_digest_is_pushable()
+    test_status_mail_reports_failures_and_fetch_evidence()
+    test_fetch_takes_all_not_only_last_50()
+    test_fetch_gap_is_retried_until_success()
+    test_uidvalidity_change_resets_cursor_and_identity()
+    test_state_init_refuses_overwrite_and_backs_up()
+    test_state_init_marks_only_mail_before_cutoff()
+    test_official_cli_rejects_date_selector()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()

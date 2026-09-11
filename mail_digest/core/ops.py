@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import Config
 from .imap_client import fetch_recent
+from .state import write_json_atomic
 
 
 def _load_json_obj(path: Path) -> dict:
@@ -24,7 +25,8 @@ def _save_json_obj(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _load_processed(path: Path) -> set[int]:
+def _load_processed(path: Path) -> set:
+    """读已处理集合（旧版本是裸 UID 整数，新版本是完整 source_id 字符串）。"""
     if not path.exists():
         return set()
     try:
@@ -33,10 +35,9 @@ def _load_processed(path: Path) -> set[int]:
         return set()
 
 
-def _save_processed(path: Path, processed: set[int]) -> None:
+def _save_processed(path: Path, processed) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted(processed), ensure_ascii=False, indent=2),
-                    encoding="utf-8")
+    write_json_atomic(path, sorted(processed, key=str))
 
 
 def parse_date_arg(arg: str | None) -> object:
@@ -52,10 +53,11 @@ def parse_date_arg(arg: str | None) -> object:
 def cmd_fetch(cfg: Config, args: argparse.Namespace) -> None:
     if not cfg.imap_user or not cfg.imap_auth_code:
         sys.exit("未配置邮箱：复制 .env.example 为 .env，填写 IMAP_USER 和 IMAP_AUTH_CODE（16 位授权码）")
-    recent = args.recent or cfg.default_recent
+    # 注意：不能用 `args.recent or 默认值`——那会把显式的 0/None 语义搅在一起。
+    recent = getattr(args, "recent", None)
     folder = getattr(args, "folder", None) or cfg.default_folder
     mails = fetch_recent(cfg, recent=recent, folder=folder)
-    print(f"✅ 拉取 {len(mails)} 封邮件 → {cfg.eml_dir}")
+    print(f"✅ 本轮拉取 {len(mails)} 封邮件 → {cfg.eml_dir}")
     for m in mails:
         when = m.date.strftime("%Y-%m-%d %H:%M") if m.date else "(无日期)"
         print(f"   {when}  [{m.uid:>6}]  {m.from_[:32]:<32} | {m.subject[:60]}")

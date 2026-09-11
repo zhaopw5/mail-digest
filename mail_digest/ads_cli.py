@@ -25,7 +25,7 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    p_f = sub.add_parser("fetch", help="拉取最近邮件到 data/emails")
+    p_f = sub.add_parser("fetch", help="按 UID 增量拉取邮件（首次接管默认全量）")
     p_f.add_argument("--recent", type=int, default=None)
     p_f.add_argument("--folder", default=None)
 
@@ -39,9 +39,13 @@ def main() -> None:
     _g.add_argument("--test", action="store_true", help="测试推送（[TEST] 标题，不改状态）")
     _g.add_argument("--dry-run", action="store_true", help="预览，不发送不改状态")
     p_p.add_argument("--date", default=None, help="仅 --test/--dry-run 选择内容日期")
+    p_p.add_argument("--cutoff", default=None, help="仅供测试/补跑：显式指定正式推送截止点")
     si = sub.add_parser("state-init", help="初始化正式推送状态（旧版本迁移）")
     si.add_argument("--last-official", required=True)
-    si.add_argument("--mark-existing-sent", action="store_true", help="把现有简报标记为已发送")
+    si.add_argument("--mark-existing-sent", action="store_true",
+                    help="把截止点之前的现有简报标记为已发送（需 --confirm）")
+    si.add_argument("--confirm", action="store_true", help="确认执行不可逆操作")
+    si.add_argument("--force", action="store_true", help="覆盖已存在的状态文件（会先备份）")
 
     sub.add_parser("html", help="生成合并 HTML 总览")
 
