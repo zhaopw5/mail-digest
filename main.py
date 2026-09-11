@@ -2,7 +2,7 @@
 """Mail Digest 入口（薄壳）→ 逻辑在 mail_digest/cli.py。
 
 两个独立 Agent + 公共底座：
-  python main.py ads run | ads push
+  python main.py ads run | ads push --official|--test|--dry-run
   python main.py grants run | grants push
   python main.py fetch | html | all
 """

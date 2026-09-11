@@ -12,7 +12,9 @@ import os
 
 from mail_digest.core.config import Config
 from mail_digest.core.ops import cmd_fetch
-from mail_digest.processors.ads.ops import cmd_ads_push, cmd_ads_run, cmd_html
+from mail_digest.processors.ads.ops import (
+    cmd_ads_push, cmd_ads_run, cmd_ads_state_init, cmd_html,
+)
 from mail_digest.processors.grants.ops import cmd_grants_push, cmd_grants_run
 
 
@@ -44,9 +46,20 @@ def main() -> None:
     a_run = ads_sub.add_parser("run", help="识别 ADS 推送 → ADS API → 中文简报")
     a_run.add_argument("--force", action="store_true")
     a_run.add_argument("--limit", type=int, default=None)
-    a_push = ads_sub.add_parser("push", help="把某天 ADS 中文简报邮件发给自己")
-    a_push.add_argument("--date", default=None)
-    a_push.add_argument("--dry-run", action="store_true", help="只打印将发送内容，不连接 SMTP")
+    a_push = ads_sub.add_parser("push", help="推送 ADS 简报（必须指定模式）")
+    _g = a_push.add_mutually_exclusive_group(required=True)
+    _g.add_argument("--official", action="store_true",
+                    help="正式推送（cron 用）：发送全部尚未正式发送的 ADS 简报")
+    _g.add_argument("--test", action="store_true",
+                    help="测试推送：标题加 [TEST]，不改变任何正式状态")
+    _g.add_argument("--dry-run", action="store_true",
+                    help="预览：不发送、不修改状态")
+    a_push.add_argument("--date", default=None, help="仅 --test/--dry-run 用于选择内容日期")
+    si = ads_sub.add_parser("state-init", help="初始化正式推送状态（旧版本迁移）")
+    si.add_argument("--last-official", required=True,
+                    help="上次正式推送时间，如 '2026-09-11 09:27:00+08:00'")
+    si.add_argument("--mark-existing-sent", action="store_true",
+                    help="把现有简报标记为已发送（避免初始化后重发历史）")
 
     p_grants = sub.add_parser("grants", help="项目申报 Agent")
     g_sub = p_grants.add_subparsers(dest="grants_cmd", required=True)
@@ -68,7 +81,12 @@ def main() -> None:
     if args.cmd == "fetch":
         cmd_fetch(cfg, args)
     elif args.cmd == "ads":
-        (cmd_ads_run if args.ads_cmd == "run" else cmd_ads_push)(cfg, args)
+        if args.ads_cmd == "run":
+            cmd_ads_run(cfg, args)
+        elif args.ads_cmd == "push":
+            cmd_ads_push(cfg, args)
+        else:
+            cmd_ads_state_init(cfg, args)
     elif args.cmd == "grants":
         (cmd_grants_run if args.grants_cmd == "run" else cmd_grants_push)(cfg, args)
     elif args.cmd == "html":

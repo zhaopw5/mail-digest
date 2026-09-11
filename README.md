@@ -198,10 +198,13 @@ pip install -e ".[all]"       # 两个都要
    python3 main.py fetch                 # 公共：拉取邮件到 data/emails
    # ADS 文献 Agent
    python3 main.py ads run               # 推送识别 → ADS API → 中文翻译/点评/分级简报
-   python3 main.py ads push              # 当天简报邮件发给自己
+   python3 main.py ads push --official   # 正式推送：发送本次截止点前所有未发送简报（唯一会改状态、留痕的模式）
+   python3 main.py ads push --dry-run    # 试运行：只打印将要发送什么，不发信、不改状态
+   python3 main.py ads push --test       # 测试推送：主题加 [TEST] 前缀发给自己，不收尾状态（可反复试）
    # 项目申报 Agent
    python3 main.py grants run            # 申报通知 → 附件安全解析 → 申报机会清单
    python3 main.py grants push           # 当天清单邮件发给自己
+   python3 main.py ads state-init --last-official "2026-09-11 09:27:00+08:00"   # 首次接管邮箱时，声明历史简报已发送
    python3 main.py all                   # 一键：fetch + 已启用 Agent
    python3 main.py html                  # 重新生成合并 HTML 总览
    ```
@@ -210,10 +213,21 @@ pip install -e ".[all]"       # 两个都要
 5. **定时（可选）**：`crontab -e` 添加，例如每天早上 9 点（`&&` 保证某步失败即停，
    不推送不完整结果；`html` 无简报时已优雅返回，不会阻断链路）：
    ```cron
-   0 9 * * * cd /path/to/project && { .venv/bin/python main.py all && .venv/bin/python main.py html && .venv/bin/python main.py ads push && .venv/bin/python main.py grants push; } >> data/cron.log 2>&1
+   0 9 * * * cd /path/to/project && { .venv/bin/python main.py all && .venv/bin/python main.py html && .venv/bin/python main.py ads push --official && .venv/bin/python main.py grants push; } >> data/cron.log 2>&1
    ```
    也可用两个独立 Agent 入口分别定时：`ads-digest` / `grants-digest`（见 pyproject scripts）。
-   前提：机器在设定时间保持开机；错过可用 `python3 main.py all && python3 main.py ads push && python3 main.py grants push` 手动补跑。
+   前提：机器在设定时间保持开机；错过可用同一条命令手动补跑。
+
+   推送边界（重要）：Agent 按**邮件到达时间（IMAP INTERNALDATE）**判断，而不是邮件里的
+   `Date:` 头，也不是"今天"这一天。每次正式推送会记录一个截止点（cutoff），只发送
+   "截止点之前收到、且从未正式发送过"的简报；因此：
+   - 昨晚 19:00 收到的 ADS 邮件，今早 9:00 推送一定包含（不因跨日期而漏）；
+   - 停机几天后恢复，会把这几天积压的简报一次补齐（无 3 天窗口限制）；
+   - 正式推送失败时截止点不推进，下次自动重发同一批（不漏不重）；
+   - `--test` / `--dry-run` 永不改变正式状态，可放心反复验证。
+
+   时区：`MAIL_DIGEST_TIMEZONE`（默认 `Asia/Shanghai`）决定日志、简报文件名与"早 9 点窗口"的
+   计算口径；服务器在境外时务必显式设置。
 6. 产物：英文/中文简报与清单在 `data/digests/`，合并 HTML 总览 `data/digests/ADS文献简报-中文总览.html`。
    本地测试：`python3 tests/test_local.py`（无网络）。
 
@@ -444,6 +458,7 @@ zip/tar 解压 → 应抛出 `AttachmentError` 且目录外无残留文件（tes
 | `ADS_LLM_API_KEY` / `GRANTS_LLM_API_KEY` | 可选：给单个 Agent 用独立 key（不回退公共） | 可选 |
 | `GRANTS_STRICT_AUTH` | `true` = 只处理通过了邮箱服务器 SPF/DKIM 认证的申报邮件（更安全，见第 13 节） | 可选 |
 | `MAIL_DIGEST_DATA_DIR` | 数据目录（默认项目内 `data/`），多人部署时建议各自独立目录 | 可选 |
+| `MAIL_DIGEST_TIMEZONE` | 时区（默认 `Asia/Shanghai`），影响日志、简报文件名与推送窗口口径 | 可选 |
 
 **两个完整示例**：
 

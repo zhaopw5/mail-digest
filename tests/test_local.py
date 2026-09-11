@@ -394,36 +394,6 @@ def test_authserv_id_trust() -> None:
     assert auth_sender_trusted(legit, strict=True, allowed_servers="mail.sysu.edu.cn")
 
 
-def test_ads_push_sends_via_smtp() -> None:
-    """ADS push 有当天简报时真实走到 SMTP 发送（mock 网络）。"""
-    import os
-    import tempfile
-    from unittest import mock
-    from mail_digest.core.config import Config
-    from mail_digest.processors.ads import delivery
-
-    with tempfile.TemporaryDirectory() as td:
-        os.environ["MAIL_DIGEST_DATA_DIR"] = td
-        try:
-            cfg = Config.load()
-            cfg.imap_user = "me@test.edu.cn"
-            cfg.smtp_host = "smtp.test.edu.cn"
-            cfg.smtp_port = 465
-            (cfg.zh_digest_dir).mkdir(parents=True)
-            today = __import__("datetime").date.today()
-            (cfg.zh_digest_dir / f"ads_{today:%Y%m%d}_000001.zh.md").write_text(
-                "# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）\n\n### 1. 标题\n- 链接：https://ui.adsabs.harvard.edu/abs/2026ApJ...963..100A/abstract\n", encoding="utf-8")
-            sent = {}
-            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
-                ok = delivery.push(cfg)
-                m.assert_called_once()
-                sent["subject"] = m.call_args.args[2]
-            assert ok is True
-            assert "ADS 文献简报" in sent["subject"]
-        finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
-
-
 
 def test_legacy_failed_in_processed_gets_retried() -> None:
     """旧失败 uid 同时在 processed 与缓存(error)：普通运行必须重新调用 process_mail。"""
@@ -533,30 +503,6 @@ def test_authserv_folded_spoof_rejected() -> None:
 
 
 
-def test_ads_push_empty_sends_status() -> None:
-    """ADS 无新推送时，默认推送应发送『今日无新推送』状态邮件（不静默）。"""
-    import os
-    import tempfile
-    from argparse import Namespace
-    from unittest import mock
-    from mail_digest.core.config import Config
-    from mail_digest.processors.ads.ops import cmd_ads_push
-
-    with tempfile.TemporaryDirectory() as td:
-        os.environ["MAIL_DIGEST_DATA_DIR"] = td
-        try:
-            cfg = Config.load()
-            cfg.imap_user = "me@test.edu.cn"
-            cfg.smtp_host = "smtp.test.edu.cn"
-            cfg.smtp_port = 465
-            with mock.patch("mail_digest.processors.ads.ops.push", return_value=False), \
-                 mock.patch("mail_digest.processors.ads.ops._send_ads_status_empty") as st:
-                cmd_ads_push(cfg, Namespace(date=None, dry_run=False))
-                st.assert_called_once_with(cfg)     # 空推送必须走状态邮件
-        finally:
-            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
-
-
 
 def test_grants_push_empty_sends_status() -> None:
     """申报无新清单时，默认推送应发送『今日无新申报通知』状态邮件；--date 不打扰。"""
@@ -585,64 +531,184 @@ def test_grants_push_empty_sends_status() -> None:
 
 
 
-def test_ads_push_cross_day_digest() -> None:
-    """跨天场景：简报日期是昨天（未推送过）→ 默认推送必须发送并记录；重复推送不再发。"""
+
+
+
+# ---------------- ADS 正式推送状态机（四种状态分离）----------------
+
+def _ads_env(td):
     import os
-    import tempfile
-    from datetime import date, timedelta
-    from unittest import mock
+    os.environ["MAIL_DIGEST_DATA_DIR"] = td
     from mail_digest.core.config import Config
+    cfg = Config.load()
+    cfg.imap_user = "me@test.edu.cn"
+    cfg.smtp_host = "smtp.test.edu.cn"
+    cfg.smtp_port = 465
+    cfg.eml_dir.mkdir(parents=True, exist_ok=True)
+    cfg.zh_digest_dir.mkdir(parents=True, exist_ok=True)
+    return cfg
+
+
+def _add_ads_mail(cfg, uid, received_at, with_digest=True):
+    """构造一封 ADS 原始邮件（.eml + sidecar 索引）与可选简报，返回 source_id。"""
+    import json
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["From"] = "ads@cfa.harvard.edu"
+    msg["Subject"] = "Daily myADS Notification"
+    msg["Date"] = received_at.strftime("%a, %d %b %Y %H:%M:%S %z")
+    msg.set_content("myADS Personal Notification Service Results")
+    eml = cfg.eml_dir / f"{received_at:%Y%m%d}_{uid:06d}.eml"
+    eml.write_bytes(msg.as_bytes())
+    idxf = cfg.eml_dir / "index.json"
+    idx = json.loads(idxf.read_text(encoding="utf-8")) if idxf.exists() else {}
+    sid = f"INBOX:1:{uid}"
+    idx[str(uid)] = {"source_id": sid, "folder": "INBOX", "uidvalidity": 1,
+                     "received_at": received_at.isoformat(timespec="seconds"),
+                     "eml": eml.name}
+    idxf.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+    if with_digest:
+        (cfg.zh_digest_dir / f"ads_{received_at:%Y%m%d}_{uid:06d}.zh.md").write_text(
+            "# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）"
+            "\n\n### 1. Title\n", encoding="utf-8")
+    return sid
+
+
+def test_official_includes_cross_day_mail() -> None:
+    """① 跨日期窗口：昨天 19 点收到 → 今早正式推送必须包含。"""
+    import json, os, tempfile
+    from datetime import datetime, timedelta
+    from unittest import mock
     from mail_digest.processors.ads import delivery
 
     with tempfile.TemporaryDirectory() as td:
-        os.environ["MAIL_DIGEST_DATA_DIR"] = td
         try:
-            cfg = Config.load()
-            cfg.imap_user = "me@test.edu.cn"
-            cfg.zh_digest_dir.mkdir(parents=True)
-            yday = date.today() - timedelta(days=1)
-            (cfg.zh_digest_dir / f"ads_{yday:%Y%m%d}_000001.zh.md").write_text(
-                "# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）\n"
-                "\n### 1. Title\n- 链接：https://ui.adsabs.harvard.edu/abs/X/abstract\n",
-                encoding="utf-8")
+            cfg = _ads_env(td)
+            recv = datetime.now(cfg.tz()) - timedelta(hours=14)
+            _add_ads_mail(cfg, 1001, recv)
             with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
-                assert delivery.push(cfg) is True          # 跨天简报应发出
-                m.assert_called_once()
-                assert delivery.push(cfg) is False         # 已推送过 → 无新内容
-            assert f"{yday:%Y%m%d}" in cfg.ads_pushed_file.read_text(encoding="utf-8")
+                r = delivery.push_official(cfg)
+                assert r["sent"] is True and r["n_items"] == 1, r
+                assert m.call_args.args[2].startswith("ADS 文献简报"), m.call_args.args[2]
+            st = json.loads(cfg.ads_state_file.read_text(encoding="utf-8"))
+            assert st["items"]["INBOX:1:1001"]["official_sent_at"]
         finally:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
 
-
-def test_ads_push_merges_multiple_unpushed() -> None:
-    """窗口内多封推送（不同邮件日期）必须合并一封全部发出，不漏早期那封。"""
-    import os
-    import tempfile
-    from datetime import date, timedelta
+def test_test_mode_does_not_touch_official_state() -> None:
+    """② 测试隔离：连发 3 次 --test，正式状态不变，随后正式推送仍包含内容。"""
+    import os, tempfile
+    from datetime import datetime
     from unittest import mock
-    from mail_digest.core.config import Config
     from mail_digest.processors.ads import delivery
 
     with tempfile.TemporaryDirectory() as td:
-        os.environ["MAIL_DIGEST_DATA_DIR"] = td
         try:
-            cfg = Config.load()
-            cfg.imap_user = "me@test.edu.cn"
-            cfg.zh_digest_dir.mkdir(parents=True)
-            body = ("# ADS 文献简报（中文版）\n\n## 📚 grb_cosmicray · 伽马射线暴与宇宙线（1 条）\n"
-                    "\n### 1. Title\n")
-            for delta, uid in ((2, "000001"), (1, "000002")):
-                d = date.today() - timedelta(days=delta)
-                (cfg.zh_digest_dir / f"ads_{d:%Y%m%d}_{uid}.zh.md").write_text(body, encoding="utf-8")
+            cfg = _ads_env(td)
+            _add_ads_mail(cfg, 1002, datetime.now(cfg.tz()))
             with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
-                assert delivery.push(cfg) is True
-                m.assert_called_once()                      # 合并为一封
-                subject = m.call_args.args[2]
-                assert "~" in subject, subject               # 主题含日期范围
-                assert delivery.push(cfg) is False           # 已全部推送 → 无新内容
-            pushed = cfg.ads_pushed_file.read_text(encoding="utf-8")
-            assert f"{(date.today() - timedelta(days=2)):%Y%m%d}" in pushed
+                for _ in range(3):
+                    r = delivery.push_test(cfg)
+                    assert r["subject"].startswith("[TEST] ")
+                assert m.call_count == 3
+                assert all(c.args[2].startswith("[TEST] ") for c in m.call_args_list)
+            assert not cfg.ads_state_file.exists() or not delivery.load_state(cfg)["items"]
+            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+                r2 = delivery.push_official(cfg)
+            assert r2["sent"] is True and r2["n_items"] == 1, r2
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def test_same_day_second_mail_sent_next_run() -> None:
+    """③ 同日期第二封：第一封正式发送后新到的第二封，下次正式推送必须包含。"""
+    import os, tempfile
+    from datetime import datetime
+    from unittest import mock
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            now = datetime.now(cfg.tz())
+            _add_ads_mail(cfg, 1003, now)
+            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+                assert delivery.push_official(cfg)["n_items"] == 1
+            _add_ads_mail(cfg, 1004, now)                      # 同日第二封
+            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+                r = delivery.push_official(cfg)
+            assert r["sent"] is True and r["n_items"] == 1, r   # 只发新增那封
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def test_outage_over_three_days_still_backfilled() -> None:
+    """④ 停机四天：恢复后必须补发四天内全部未正式发送内容（无 3 天限制）。"""
+    import os, tempfile
+    from datetime import datetime, timedelta
+    from unittest import mock
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            old = datetime.now(cfg.tz()) - timedelta(days=4)
+            _add_ads_mail(cfg, 1005, old)
+            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+                r = delivery.push_official(cfg)
+            assert r["sent"] is True and r["n_items"] == 1, r
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def test_smtp_failure_does_not_advance_state() -> None:
+    """⑤ SMTP 失败：状态不得推进；恢复后第二次必须重新发送。"""
+    import os, tempfile
+    from datetime import datetime
+    from unittest import mock
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            _add_ads_mail(cfg, 1006, datetime.now(cfg.tz()))
+            with mock.patch("mail_digest.processors.ads.delivery.send_html",
+                            side_effect=RuntimeError("smtp down")):
+                try:
+                    delivery.push_official(cfg)
+                    raise AssertionError("发送失败应抛出异常")
+                except RuntimeError:
+                    pass
+            st = delivery.load_state(cfg)
+            assert not st["items"] and not st["last_official_cutoff"], st
+            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+                assert delivery.push_official(cfg)["sent"] is True
+        finally:
+            os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
+
+
+def test_boundary_mail_after_cutoff_goes_next_window() -> None:
+    """⑥ 边界：截止点之后到达的邮件本次不发，必须进入下一次正式窗口。"""
+    import os, tempfile
+    from datetime import datetime, timedelta
+    from unittest import mock
+    from mail_digest.processors.ads import delivery
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            cfg = _ads_env(td)
+            now = datetime.now(cfg.tz())
+            cutoff = now - timedelta(hours=1)
+            _add_ads_mail(cfg, 1007, now)                      # 晚于本次截止点
+            with mock.patch("mail_digest.processors.ads.delivery.send_html") as m:
+                r1 = delivery.push_official(cfg, cutoff=cutoff)
+                assert r1["sent"] is False                     # 本次不发内容
+                assert "无新推送" in (r1.get("status_mail") or ""), r1
+                assert m.call_count == 1                       # 只发状态邮件，不发简报
+            with mock.patch("mail_digest.processors.ads.delivery.send_html"):
+                r2 = delivery.push_official(cfg, cutoff=now + timedelta(minutes=1))
+            assert r2["sent"] is True and r2["n_items"] == 1, r2  # 下次窗口补发
         finally:
             os.environ.pop("MAIL_DIGEST_DATA_DIR", None)
 
@@ -668,11 +734,13 @@ if __name__ == "__main__":
     test_failed_mail_not_marked_processed()
     test_legacy_cache_status_migration()
     test_authserv_id_trust()
-    test_ads_push_sends_via_smtp()
-    test_ads_push_empty_sends_status()
     test_grants_push_empty_sends_status()
-    test_ads_push_cross_day_digest()
-    test_ads_push_merges_multiple_unpushed()
+    test_official_includes_cross_day_mail()
+    test_test_mode_does_not_touch_official_state()
+    test_same_day_second_mail_sent_next_run()
+    test_outage_over_three_days_still_backfilled()
+    test_smtp_failure_does_not_advance_state()
+    test_boundary_mail_after_cutoff_goes_next_window()
     test_legacy_failed_in_processed_gets_retried()
     test_force_failure_clears_old_success_cache()
     test_authserv_similar_domain_rejected()

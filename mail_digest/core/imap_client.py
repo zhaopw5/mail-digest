@@ -51,7 +51,9 @@ def _body_parts(msg: email.message.Message) -> tuple[str, str]:
     return text, html
 
 
-def _parse_message(uid: int, folder: str, msg: email.message.Message) -> Mail:
+def _parse_message(uid: int, folder: str, msg: email.message.Message,
+                   uidvalidity: int | None = None,
+                   received_at=None) -> Mail:
     text, html = _body_parts(msg)
     date = None
     try:
@@ -79,6 +81,9 @@ def _parse_message(uid: int, folder: str, msg: email.message.Message) -> Mail:
         body_html=html,
         raw_path=Path(""),
         headers=headers,
+        source_id=f"{folder}:{uidvalidity if uidvalidity is not None else '?'}:{uid}",
+        uidvalidity=uidvalidity,
+        received_at=received_at,
     )
 
 
@@ -126,16 +131,48 @@ def fetch_recent(cfg, recent: int, folder: str = "INBOX",
         recent_uids = all_uids[-recent:] if recent else all_uids
         for uid_b in recent_uids:
             uid = int(uid_b)
-            typ, msg_data = conn.uid("fetch", str(uid), "(RFC822)")
+            typ, msg_data = conn.uid("fetch", str(uid), "(INTERNALDATE RFC822)")
             if typ != "OK" or not msg_data or msg_data[0] is None:
                 continue
+            meta = msg_data[0][0] or b""
             raw = msg_data[0][1]
+            # INTERNALDATE = 邮箱服务器记录的收件时间（比邮件 Date 头可靠，用于窗口判定）
+            recv = None
+            _mi = re.search(rb'INTERNALDATE "([^"]+)"', meta)
+            if _mi:
+                try:
+                    recv = parsedate_to_datetime(_mi.group(1).decode())
+                except Exception:
+                    recv = None
             msg = email.message_from_bytes(raw)
-            mail = _parse_message(uid, folder, msg)
+            mail = _parse_message(uid, folder, msg, uidvalidity=validity, received_at=recv)
             raw_path = eml_dir / _eml_name(mail, uid)
             raw_path.write_bytes(raw)
             mail.raw_path = raw_path
             mails.append(mail)
+        # sidecar 索引：uid → source_id / received_at（离线读取时恢复状态标识）
+        try:
+            import json as _json_idx
+            idx_file = eml_dir / "index.json"
+            idx = {}
+            if idx_file.exists():
+                try:
+                    idx = _json_idx.loads(idx_file.read_text(encoding="utf-8"))
+                except Exception:
+                    idx = {}
+            for m in mails:
+                idx[str(m.uid)] = {
+                    "source_id": m.source_id,
+                    "folder": m.folder,
+                    "uidvalidity": m.uidvalidity,
+                    "received_at": m.received_at.isoformat() if m.received_at else None,
+                    "eml": m.raw_path.name if m.raw_path else "",
+                }
+            idx_file.write_text(_json_idx.dumps(idx, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        except Exception:
+            pass
+
         if validity is not None:
             try:
                 vf = cfg.data_dir / "imap_uidvalidity.json"
@@ -177,5 +214,34 @@ def load_mails_from_dir(eml_dir: Path, folder: str = "INBOX") -> list[Mail]:
             uid = int(stem.split("_")[-1])
         mail = _parse_message(uid, folder, msg)
         mail.raw_path = p
+        rec = _load_index(eml_dir).get(str(uid))
+        if rec:
+            mail.source_id = rec.get("source_id") or mail.source_id
+            mail.uidvalidity = rec.get("uidvalidity")
+            ra = rec.get("received_at")
+            if ra:
+                try:
+                    from datetime import datetime as _dt
+                    mail.received_at = _dt.fromisoformat(ra)
+                except Exception:
+                    pass
+        if mail.received_at is None:          # 兜底：.eml 落盘时间
+            try:
+                from datetime import datetime as _dt
+                mail.received_at = _dt.fromtimestamp(p.stat().st_mtime).astimezone()
+            except Exception:
+                pass
         mails.append(mail)
     return mails
+
+
+def _load_index(eml_dir: Path) -> dict:
+    """读取 sidecar 索引（uid → source_id/received_at）。"""
+    import json
+    f = eml_dir / "index.json"
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return {}

@@ -14,7 +14,7 @@ from ...core.ops import (
 )
 from ...core.research_profile import PROFILE_SUMMARY
 from .api import ADSAPIError, ADSClient, fill_from_doc
-from .delivery import push
+from .delivery import preview, push_official, push_test, state_init
 from .overview import merge_markdown_files
 from .models import ADSArticle
 from .parser import extract_bibcodes, is_ads_email, parse_myads_sections
@@ -131,44 +131,36 @@ def cmd_ads_run(cfg: Config, args: argparse.Namespace) -> None:
     _save_processed(cfg.processed_file, processed | newly_processed)
 
 def cmd_ads_push(cfg: Config, args: argparse.Namespace) -> None:
+    """ADS 推送（三模式互斥必填）：--official / --test / --dry-run。"""
     when = _parse_date_arg(getattr(args, "date", None))
     if getattr(args, "dry_run", False):
-        label = (when or __import__("datetime").date.today()).strftime("%Y-%m-%d")
-        files = sorted(cfg.zh_digest_dir.glob(f"ads_{label.replace('-','')}_*.zh.md"))
-        print(f"（dry-run）将发送 {label} 的 ADS 简报（{len(files)} 份）→ {cfg.imap_user}，不连接 SMTP")
+        print(preview(cfg, when))
         return
-    if not cfg.smtp_host:
-        sys.exit("未配置 SMTP_HOST（.env），无法推送")
-    ok = push(cfg, when)
-    label = when.strftime("%Y-%m-%d") if when else "今天"
-    if ok:
-        print(f"✅ 已将 {label} 的 ADS 中文简报发送到 {cfg.imap_user}")
-    elif when is None:
-        # 每天都要有 ADS 状态：无新推送也发一封简短状态邮件（而非静默）
-        _send_ads_status_empty(cfg)
-        print(f"ℹ️  {label} 无新的 ADS 推送——已发送『无新推送』状态邮件到 {cfg.imap_user}")
-    else:
-        print(f"ℹ️  {label} 没有 ADS 推送邮件（指定历史日期，不发状态）")
+    if getattr(args, "test", False):
+        r = push_test(cfg, when)
+        print(f"✅ [TEST] 测试推送已发送（不改变正式状态）：{r['subject']}")
+        return
+    if getattr(args, "official", False):
+        r = push_official(cfg)
+        if r.get("sent"):
+            extra = f"；另有 {r['failed_pending']} 封 ADS 邮件处理失败，下次自动重试" if r.get("failed_pending") else ""
+            print(f"✅ 正式推送完成：{r['subject']}（合并 {r['n_items']} 份简报）{extra}")
+        else:
+            extra = f"（{r['failed_pending']} 封处理失败待重试，未推进状态）" if r.get("failed_pending") else ""
+            print(f"ℹ️  本次无新内容可推送，已发送状态邮件：{r.get('status_mail','')}{extra}")
+        return
+    sys.exit("请明确指定模式：--official（正式推送）/ --test（测试）/ --dry-run（预览）")
 
 
-def _send_ads_status_empty(cfg: Config) -> None:
-    """发送『今日无新 ADS 推送』状态邮件（让用户每天都能确认 Agent 已检查）。"""
-    from datetime import date
-    from ...core.push import send_html
+def cmd_ads_state_init(cfg: Config, args: argparse.Namespace) -> None:
+    """初始化 ADS 正式推送状态（旧版本按日期记录无法逐封迁移）。"""
+    try:
+        msg = state_init(cfg, args.last_official,
+                         mark_existing_sent=getattr(args, "mark_existing_sent", False))
+    except ValueError as exc:
+        sys.exit(str(exc))
+    print("✅ " + msg)
 
-    today = date.today()
-    html = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8"><title>ADS 文献状态</title></head>
-<body style="font-family:sans-serif;max-width:640px;margin:2em auto;line-height:1.7">
-<h2 style="color:#0b3d91">ADS 文献 Agent · 每日状态 {today:%Y-%m-%d}</h2>
-<p><strong>今天没有收到新的 myADS 文献推送</strong>，因此没有生成新的文献简报。</p>
-<p>本邮件用于确认每日自动检查已正常运行。原因通常为：</p>
-<ul>
-  <li>ADS 当天没有发布命中你订阅关键词（<code>grb_cosmicray</code> / <code>solaractivity_cosmicray</code>）的新文献；</li>
-  <li>或新文献推送尚未到达本邮箱（可到 ADS 网站检查订阅状态）。</li>
-</ul>
-<p style="color:#888">mail-digest 每日自动运行 · 有推送时你会收到详细简报，无推送时收到本状态邮件。</p>
-</body></html>"""
-    send_html(cfg, cfg.imap_user, f"ADS 文献状态 {today:%Y-%m-%d}：今日无新推送", html)
 
 def cmd_html(cfg: Config, args: argparse.Namespace) -> None:
     files = sorted(cfg.zh_digest_dir.glob("*.zh.md"))

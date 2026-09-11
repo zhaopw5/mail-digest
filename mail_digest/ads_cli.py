@@ -15,7 +15,9 @@ def main() -> None:
         os.umask(0o077)
     from mail_digest.core.config import Config
     from mail_digest.core.ops import cmd_fetch
-    from mail_digest.processors.ads.ops import cmd_ads_push, cmd_ads_run, cmd_html
+    from mail_digest.processors.ads.ops import (
+        cmd_ads_push, cmd_ads_run, cmd_ads_state_init, cmd_html,
+    )
 
     parser = argparse.ArgumentParser(
         prog="ads-digest",
@@ -31,9 +33,15 @@ def main() -> None:
     p_r.add_argument("--force", action="store_true")
     p_r.add_argument("--limit", type=int, default=None)
 
-    p_p = sub.add_parser("push", help="把当天 ADS 中文简报邮件发给自己")
-    p_p.add_argument("--date", default=None)
-    p_p.add_argument("--dry-run", action="store_true", help="只打印将发送内容，不连接 SMTP")
+    p_p = sub.add_parser("push", help="推送 ADS 简报（必须指定模式）")
+    _g = p_p.add_mutually_exclusive_group(required=True)
+    _g.add_argument("--official", action="store_true", help="正式推送（cron 用）")
+    _g.add_argument("--test", action="store_true", help="测试推送（[TEST] 标题，不改状态）")
+    _g.add_argument("--dry-run", action="store_true", help="预览，不发送不改状态")
+    p_p.add_argument("--date", default=None, help="仅 --test/--dry-run 选择内容日期")
+    si = sub.add_parser("state-init", help="初始化正式推送状态（旧版本迁移）")
+    si.add_argument("--last-official", required=True)
+    si.add_argument("--mark-existing-sent", action="store_true", help="把现有简报标记为已发送")
 
     sub.add_parser("html", help="生成合并 HTML 总览")
 
@@ -45,6 +53,8 @@ def main() -> None:
         cmd_ads_run(cfg, args)
     elif args.cmd == "push":
         cmd_ads_push(cfg, args)
+    elif args.cmd == "state-init":
+        cmd_ads_state_init(cfg, args)
     else:
         cmd_html(cfg, args)
 
